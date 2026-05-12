@@ -1,25 +1,17 @@
 <!--
   DayColumnWidget — floating day-column calendar sidebar.
 
-  A narrow slide-out panel anchored to the right edge of the viewport.
-  Shows a single-day time grid with two visually distinct item types:
-  calendar events (solid blue) and tasks (dashed green). Supports
-  drag-move, drag-resize, and click-to-create via @event-calendar/core.
-
   Props (data in):
-    events        ECEvent[]       items to display (use extendedProps.kind
-                                  to distinguish 'task' vs 'event')
+    events        ECEvent[]       items to display
     open          boolean         whether the panel is expanded
 
   Callbacks (events out):
-    onToggle()                    user clicked the tab
-    onEventClick(info)            user clicked an event
-    onEventDrop(info)             user dragged an event to a new time
-    onEventResize(info)           user resized an event's duration
-    onDateClick(info)             user clicked an empty time slot
-    onEventRemove(id)             user requested removal of an event
-
-  This component is pure — it does not fetch data or call any backend.
+    onToggle()
+    onEventClick(info)
+    onEventDrop(info)
+    onEventResize(info)
+    onDateClick(info)
+    onEventRemove(id)
 -->
 <script lang="ts">
   import { Calendar, TimeGrid, Interaction } from '@event-calendar/core';
@@ -31,10 +23,6 @@
     start: string;
     end: string;
     color?: string;
-    extendedProps?: {
-      kind: 'task' | 'event';
-      [key: string]: unknown;
-    };
   }
 
   type Props = {
@@ -96,31 +84,23 @@
     return v instanceof Date ? v : new Date(v);
   }
 
-  // Stable callback refs — created once so the library's diff() never
-  // sees them as changed. They close over $props via the `on*` bindings
-  // which Svelte keeps current.
   function handleEventClassNames(info: any) {
-    const kind = info.event.extendedProps?.kind ?? 'event';
     const dur = getDurationMinutes(info.event);
-    const classes = [`ec-kind-${kind}`];
-    if (dur <= 30) classes.push('ec-short');
-    return classes;
+    return dur <= 30 ? ['ec-short'] : [];
   }
 
   function handleEventContent(info: any) {
-    const kind = info.event.extendedProps?.kind ?? 'event';
     const start = toDate(info.event.start);
     const end = toDate(info.event.end);
     const timeStr = `${formatTime(start)} – ${formatTime(end)}`;
-    const prefix = kind === 'task' ? '◻ ' : '';
     const removeBtn = `<button class="ec-remove-btn" data-event-id="${info.event.id}" title="Remove">×</button>`;
-    return {html: `<div class="ec-custom-event"><div class="ec-custom-title">${prefix}${info.event.title} ${removeBtn}</div><div class="ec-custom-time">${timeStr}</div></div>`};
+    return { html: `<div class="ec-custom-event"><div class="ec-custom-title">${info.event.title} ${removeBtn}</div><div class="ec-custom-time">${timeStr}</div></div>` };
   }
 
   function handleEventClick(info: any) {
     const target = info.jsEvent?.target as HTMLElement | undefined;
     if (target?.closest('.ec-remove-btn')) {
-      const id = target.closest('.ec-remove-btn')!.getAttribute('data-event-id');
+      const id = (target.closest('.ec-remove-btn') as HTMLElement).getAttribute('data-event-id');
       if (id) onEventRemove(id);
       return;
     }
@@ -130,6 +110,7 @@
   function handleEventDrop(info: any) { onEventDrop(info); }
   function handleEventResize(info: any) { onEventResize(info); }
   function handleDateClick(info: any) { onDateClick(info); }
+
   function handleSlotLabel(date: Date) {
     return String(date.getHours());
   }
@@ -137,7 +118,6 @@
   const calPlugins = [TimeGrid, Interaction];
   const scrollH = Math.max(6, now.getHours() - 2);
 
-  // Options created once as $state — only `events` is patched reactively.
   // svelte-ignore state_referenced_locally
   let options = $state({
     view: 'timeGridDay',
@@ -154,7 +134,7 @@
     slotMinTime: '06:00:00',
     slotMaxTime: '22:00:00',
     scrollTime: `${String(scrollH).padStart(2, '0')}:00:00`,
-    headerToolbar: {start: '', center: '', end: ''},
+    headerToolbar: { start: '', center: '', end: '' },
     dayHeaderFormat: () => '',
     slotLabelFormat: handleSlotLabel,
     eventClassNames: handleEventClassNames,
@@ -163,10 +143,7 @@
     eventDrop: handleEventDrop,
     eventResize: handleEventResize,
     dateClick: handleDateClick,
-    theme: (theme: any) => ({
-      ...theme,
-      calendar: `${theme.calendar} ec-dark`
-    }),
+    theme: (theme: any) => ({ ...theme, calendar: `${theme.calendar} ec-dark` }),
   });
 
   $effect(() => {
@@ -263,7 +240,6 @@
     min-height: 0;
   }
 
-  /* ─── Event Calendar dark-theme overrides ─── */
   .calendar-wrap :global(.ec) {
     --ec-bg-color: var(--bg);
     --ec-text-color: var(--ink);
@@ -280,13 +256,9 @@
     font-size: 12px;
   }
 
-  .calendar-wrap :global(.ec-toolbar) {
-    display: none !important;
-  }
+  .calendar-wrap :global(.ec-toolbar) { display: none !important; }
   .calendar-wrap :global(.ec-day-head),
-  .calendar-wrap :global(.ec-col-head) {
-    display: none !important;
-  }
+  .calendar-wrap :global(.ec-col-head) { display: none !important; }
 
   .calendar-wrap :global(.ec-sidebar) {
     width: 32px !important;
@@ -294,19 +266,10 @@
     color: var(--ink-soft);
   }
 
-  /* ─── Calendar events (kind=event): solid blue ─── */
-  .calendar-wrap :global(.ec-kind-event) {
+  .calendar-wrap :global(.ec-event) {
     background: #1e3a5f !important;
     border-left: 3px solid #5090d0 !important;
     color: #a8cef0 !important;
-    border-radius: 3px;
-  }
-
-  /* ─── Tasks (kind=task): dashed green border ─── */
-  .calendar-wrap :global(.ec-kind-task) {
-    background: rgba(26, 58, 42, 0.8) !important;
-    border-left: 3px dashed #50a070 !important;
-    color: #a0d8b0 !important;
     border-radius: 3px;
   }
 
@@ -314,7 +277,6 @@
     overflow: hidden;
   }
 
-  /* ─── Custom event content ─── */
   .calendar-wrap :global(.ec-custom-event) {
     padding: 1px 4px;
     overflow: hidden;
@@ -336,7 +298,6 @@
     white-space: nowrap;
   }
 
-  /* ─── Remove button ─── */
   .calendar-wrap :global(.ec-remove-btn) {
     position: absolute;
     top: 1px;

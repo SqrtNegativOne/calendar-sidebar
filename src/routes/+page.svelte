@@ -1,108 +1,159 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import DayColumnWidget, { type ECEvent } from '$lib/components/DayColumnWidget.svelte';
 
   let open = $state(true);
-
-  function today(time: string): string {
-    const d = new Date();
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}T${time}`;
-  }
-
-  let nextId = 100;
-
-  let events: ECEvent[] = $state([
-    { id: '1', title: 'Morning standup',    start: today('09:00'), end: today('09:30'), extendedProps: { kind: 'event' } },
-    { id: '2', title: 'Build auth middleware', start: today('09:30'), end: today('11:30'), extendedProps: { kind: 'task' } },
-    { id: '3', title: 'Lunch break',        start: today('12:00'), end: today('13:00'), extendedProps: { kind: 'event' } },
-    { id: '4', title: '1:1 with Sam',       start: today('13:30'), end: today('14:00'), extendedProps: { kind: 'event' } },
-    { id: '5', title: 'Review PR #42',      start: today('14:00'), end: today('14:15'), extendedProps: { kind: 'task' } },
-    { id: '6', title: 'Write API tests',    start: today('14:00'), end: today('15:30'), extendedProps: { kind: 'task' } },
-    { id: '7', title: 'Sprint retro',       start: today('15:30'), end: today('16:30'), extendedProps: { kind: 'event' } },
-    { id: '8', title: 'Fix deploy script',  start: today('16:30'), end: today('17:00'), extendedProps: { kind: 'task' } },
-  ]);
-
+  let authenticated = $state(false);
+  let loading = $state(true);
+  let syncing = $state(false);
+  let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
   function addLog(msg: string) {
     log = [msg, ...log].slice(0, 20);
   }
 
+  async function fetchEvents() {
+    try {
+      const resp = await fetch('/api/events');
+      if (!resp.ok) {
+        if (resp.status === 401) { authenticated = false; return; }
+        throw new Error(`${resp.status}`);
+      }
+      const data = await resp.json() as ECEvent[];
+      events = data;
+    } catch (err) {
+      addLog(`Sync error: ${err}`);
+    }
+  }
+
+  onMount(() => {
+    let interval: ReturnType<typeof setInterval>;
+
+    (async () => {
+      const resp = await fetch('/api/auth/status');
+      const status = await resp.json() as { authenticated: boolean };
+      authenticated = status.authenticated;
+      loading = false;
+
+      if (!authenticated) return;
+
+      syncing = true;
+      await fetchEvents();
+      syncing = false;
+
+      interval = setInterval(fetchEvents, 30_000);
+    })();
+
+    return () => clearInterval(interval);
+  });
+
   function handleToggle() { open = !open; }
+  function handleEventClick(_info: any) {}
 
-  function handleEventClick(info: any) {
-    addLog(`Clicked: "${info.event.title}"`);
-  }
-
-  function handleEventDrop(info: any) {
+  async function handleEventDrop(info: any) {
     const ev = info.event;
-    addLog(`Moved "${ev.title}" → ${new Date(ev.start).toLocaleTimeString()}`);
-    events = events.map(e => e.id === ev.id ? { ...e, start: ev.start, end: ev.end } : e);
+    const start = new Date(ev.start).toISOString();
+    const end = new Date(ev.end).toISOString();
+    addLog(`Moved "${ev.title}" to ${new Date(ev.start).toLocaleTimeString()}`);
+    events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
+    try {
+      await fetch(`/api/events/${ev.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start, end }),
+      });
+    } catch {
+      await fetchEvents();
+    }
   }
 
-  function handleEventResize(info: any) {
+  async function handleEventResize(info: any) {
     const ev = info.event;
-    addLog(`Resized "${ev.title}" → ends ${new Date(ev.end).toLocaleTimeString()}`);
-    events = events.map(e => e.id === ev.id ? { ...e, start: ev.start, end: ev.end } : e);
+    const start = new Date(ev.start).toISOString();
+    const end = new Date(ev.end).toISOString();
+    addLog(`Resized "${ev.title}" ends ${new Date(ev.end).toLocaleTimeString()}`);
+    events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
+    try {
+      await fetch(`/api/events/${ev.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ start, end }),
+      });
+    } catch {
+      await fetchEvents();
+    }
   }
 
-  function handleDateClick(info: any) {
-    const id = String(nextId++);
-    const start = info.dateStr ?? info.date?.toISOString();
-    const startDate = new Date(start);
-    const endDate = new Date(startDate.getTime() + 30 * 60000);
-    const newEvent: ECEvent = {
-      id,
-      title: 'New task',
-      start: startDate.toISOString().slice(0, 19),
-      end: endDate.toISOString().slice(0, 19),
-      extendedProps: { kind: 'task' }
-    };
-    events = [...events, newEvent];
-    addLog(`Created task at ${startDate.toLocaleTimeString()}`);
+  async function handleDateClick(info: any) {
+    const start = new Date(info.dateStr ?? info.date?.toISOString());
+    const end = new Date(start.getTime() + 30 * 60_000);
+    try {
+      const resp = await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New task', start: start.toISOString(), end: end.toISOString() }),
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const newEv = await resp.json() as ECEvent;
+      events = [...events, newEv];
+      addLog(`Created task at ${start.toLocaleTimeString()}`);
+    } catch (err) {
+      addLog(`Create failed: ${err}`);
+    }
   }
 
-  function handleEventRemove(id: string) {
+  async function handleEventRemove(id: string) {
     const ev = events.find(e => e.id === id);
     events = events.filter(e => e.id !== id);
     addLog(`Removed "${ev?.title ?? id}"`);
+    try {
+      const resp = await fetch(`/api/events/${id}`, { method: 'DELETE' });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+    } catch {
+      await fetchEvents();
+    }
   }
 </script>
 
 <div class="demo">
   <h1>Day Column Widget</h1>
-  <p>A floating sidebar calendar for your day. Interact with the panel on the right.</p>
 
-  <ul>
-    <li><strong>Drag</strong> an event to move it</li>
-    <li><strong>Drag the bottom edge</strong> to resize</li>
-    <li><strong>Click empty space</strong> to create a 30-min task</li>
-    <li><strong>Hover + ×</strong> to remove</li>
-    <li>Events 5 &amp; 6 overlap at 2:00 PM — notice the side-by-side layout</li>
-    <li><span class="swatch task"></span> task &nbsp; <span class="swatch event"></span> calendar event</li>
-  </ul>
-
-  {#if log.length > 0}
-    <div class="log">
-      {#each log as entry}
-        <div class="log-entry">{entry}</div>
-      {/each}
-    </div>
+  {#if loading}
+    <p class="status">Checking auth...</p>
+  {:else if !authenticated}
+    <p>Connect your Google Calendar to get started.</p>
+    <a class="connect-btn" href="/api/auth/google">Connect Google Calendar</a>
+  {:else}
+    <p class="status">{syncing ? 'Syncing...' : 'Synced with Google Calendar'} &mdash; polls every 30 s</p>
+    <ul>
+      <li><strong>Drag</strong> an event to move it</li>
+      <li><strong>Drag the bottom edge</strong> to resize</li>
+      <li><strong>Click empty space</strong> to create a 30-min task</li>
+      <li><strong>Hover + ×</strong> to remove</li>
+    </ul>
+    {#if log.length > 0}
+      <div class="log">
+        {#each log as entry}
+          <div class="log-entry">{entry}</div>
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
-<DayColumnWidget
-  {events}
-  {open}
-  onToggle={handleToggle}
-  onEventClick={handleEventClick}
-  onEventDrop={handleEventDrop}
-  onEventResize={handleEventResize}
-  onDateClick={handleDateClick}
-  onEventRemove={handleEventRemove}
-/>
+{#if authenticated}
+  <DayColumnWidget
+    {events}
+    {open}
+    onToggle={handleToggle}
+    onEventClick={handleEventClick}
+    onEventDrop={handleEventDrop}
+    onEventResize={handleEventResize}
+    onDateClick={handleDateClick}
+    onEventRemove={handleEventRemove}
+  />
+{/if}
 
 <style>
   .demo {
@@ -121,6 +172,25 @@
     margin: 0 0 1.5rem;
   }
 
+  .status {
+    font-size: 0.85rem;
+  }
+
+  .connect-btn {
+    display: inline-block;
+    padding: 0.5rem 1.2rem;
+    background: var(--accent);
+    color: var(--ink);
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: opacity 150ms;
+  }
+  .connect-btn:hover {
+    opacity: 0.85;
+  }
+
   ul {
     list-style: none;
     padding: 0;
@@ -131,17 +201,6 @@
     font-size: 0.9rem;
     border-bottom: 1px solid var(--line);
   }
-
-  .swatch {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 2px;
-    vertical-align: middle;
-    margin-right: 4px;
-  }
-  .swatch.task  { background: rgba(26,58,42,0.8); border-left: 3px dashed #50a070; }
-  .swatch.event { background: #1e3a5f;            border-left: 3px solid  #5090d0; }
 
   .log {
     border-top: 1px solid var(--line);
