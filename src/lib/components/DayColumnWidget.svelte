@@ -61,9 +61,22 @@
 
   const now = new Date();
   const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const dateStr = `${monthNames[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()}`;
-  const dayStr = dayNames[now.getDay()];
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  function ordinal(n: number): string {
+    const v = n % 100;
+    const s = ['th','st','nd','rd'];
+    return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]);
+  }
+
+  function isoWeek(d: Date): number {
+    const utc = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    utc.setUTCDate(utc.getUTCDate() + 4 - (utc.getUTCDay() || 7));
+    const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
+    return Math.ceil(((utc.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+  }
+
+  const headerStr = `${ordinal(now.getDate())} ${monthNames[now.getMonth()]} ${now.getFullYear()} ⋅ ${dayNames[now.getDay()].slice(0, 3)} ⋅ Week #${isoWeek(now)}`;
 
   function getDurationMinutes(event: any): number {
     const s = event.start instanceof Date ? event.start : new Date(event.start);
@@ -167,8 +180,7 @@
   </button>
   <div class="panel">
     <div class="panel-header">
-      <div class="date-label">{dateStr}</div>
-      <div class="day-label">{dayStr}</div>
+      <div class="header-line">{headerStr}</div>
     </div>
     <div class="calendar-wrap">
       <Calendar plugins={calPlugins} {options} />
@@ -185,6 +197,7 @@
     display: flex;
     z-index: 1000;
     pointer-events: none;
+    overflow: hidden;
   }
 
   .tab {
@@ -215,33 +228,33 @@
 
   .panel {
     width: 0;
+    min-width: 0;
     overflow: hidden;
-    background: var(--bg);
-    border-left: 1px solid var(--line);
+    background: rgba(12, 12, 10, 0.88);
+    border-left: none;
     transition: width 250ms cubic-bezier(0.4, 0, 0.2, 1);
-    pointer-events: auto;
+    pointer-events: none;
     display: flex;
     flex-direction: column;
   }
   .open .panel {
     width: 280px;
+    border-left: 1px solid var(--line);
+    pointer-events: auto;
   }
 
   .panel-header {
-    padding: 12px 16px 8px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
   }
-  .panel-header .date-label {
-    font-size: 0.8rem;
+  .panel-header .header-line {
+    font-size: 0.72rem;
     color: var(--ink-soft);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-  }
-  .panel-header .day-label {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: 0.03em;
   }
 
   .calendar-wrap {
@@ -312,9 +325,9 @@
     font-weight: 500;
     font-size: 0.75rem;
     line-height: 1.3;
-    white-space: nowrap;
+    overflow-wrap: break-word;
+    word-break: break-word;
     overflow: hidden;
-    text-overflow: ellipsis;
     padding-right: 16px;
   }
   .calendar-wrap :global(.ec-custom-time) {
