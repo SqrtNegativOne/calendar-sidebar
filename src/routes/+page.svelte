@@ -5,7 +5,6 @@
   let open = $state(true);
   let authenticated = $state(false);
   let loading = $state(true);
-  let syncing = $state(false);
   let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
@@ -20,8 +19,7 @@
         if (resp.status === 401) { authenticated = false; return; }
         throw new Error(`${resp.status}`);
       }
-      const data = await resp.json() as ECEvent[];
-      events = data;
+      events = await resp.json() as ECEvent[];
     } catch (err) {
       addLog(`Sync error: ${err}`);
     }
@@ -38,10 +36,7 @@
 
       if (!authenticated) return;
 
-      syncing = true;
       await fetchEvents();
-      syncing = false;
-
       interval = setInterval(fetchEvents, 30_000);
     })();
 
@@ -55,8 +50,8 @@
     const ev = info.event;
     const start = new Date(ev.start).toISOString();
     const end = new Date(ev.end).toISOString();
-    addLog(`Moved "${ev.title}" to ${new Date(ev.start).toLocaleTimeString()}`);
     events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
+    addLog(`Moved "${ev.title}" to ${new Date(ev.start).toLocaleTimeString()}`);
     try {
       await fetch(`/api/events/${ev.id}`, {
         method: 'PATCH',
@@ -72,8 +67,8 @@
     const ev = info.event;
     const start = new Date(ev.start).toISOString();
     const end = new Date(ev.end).toISOString();
-    addLog(`Resized "${ev.title}" ends ${new Date(ev.end).toLocaleTimeString()}`);
     events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
+    addLog(`Resized "${ev.title}" ends ${new Date(ev.end).toLocaleTimeString()}`);
     try {
       await fetch(`/api/events/${ev.id}`, {
         method: 'PATCH',
@@ -116,22 +111,16 @@
   }
 </script>
 
+<!-- .demo is hidden in widget mode via _INJECT_JS in widget.py -->
 <div class="demo">
-  <h1>Day Column Widget</h1>
-
+  <h1>Calendar Sidebar</h1>
   {#if loading}
-    <p class="status">Checking auth...</p>
+    <p>Connecting...</p>
   {:else if !authenticated}
     <p>Connect your Google Calendar to get started.</p>
     <a class="connect-btn" href="/api/auth/google">Connect Google Calendar</a>
   {:else}
-    <p class="status">{syncing ? 'Syncing...' : 'Synced with Google Calendar'} &mdash; polls every 30 s</p>
-    <ul>
-      <li><strong>Drag</strong> an event to move it</li>
-      <li><strong>Drag the bottom edge</strong> to resize</li>
-      <li><strong>Click empty space</strong> to create a 30-min task</li>
-      <li><strong>Hover + ×</strong> to remove</li>
-    </ul>
+    <p class="status">Synced &mdash; polls every 30 s</p>
     {#if log.length > 0}
       <div class="log">
         {#each log as entry}
@@ -142,18 +131,18 @@
   {/if}
 </div>
 
-{#if authenticated}
-  <DayColumnWidget
-    {events}
-    {open}
-    onToggle={handleToggle}
-    onEventClick={handleEventClick}
-    onEventDrop={handleEventDrop}
-    onEventResize={handleEventResize}
-    onDateClick={handleDateClick}
-    onEventRemove={handleEventRemove}
-  />
-{/if}
+<DayColumnWidget
+  {events}
+  {open}
+  {authenticated}
+  {loading}
+  onToggle={handleToggle}
+  onEventClick={handleEventClick}
+  onEventDrop={handleEventDrop}
+  onEventResize={handleEventResize}
+  onDateClick={handleDateClick}
+  onEventRemove={handleEventRemove}
+/>
 
 <style>
   .demo {
@@ -170,10 +159,7 @@
   p {
     color: var(--ink-soft);
     margin: 0 0 1.5rem;
-  }
-
-  .status {
-    font-size: 0.85rem;
+    font-size: 0.9rem;
   }
 
   .connect-btn {
@@ -187,24 +173,12 @@
     font-weight: 500;
     transition: opacity 150ms;
   }
-  .connect-btn:hover {
-    opacity: 0.85;
-  }
-
-  ul {
-    list-style: none;
-    padding: 0;
-    margin: 0 0 2rem;
-  }
-  ul li {
-    padding: 0.3rem 0;
-    font-size: 0.9rem;
-    border-bottom: 1px solid var(--line);
-  }
+  .connect-btn:hover { opacity: 0.85; }
 
   .log {
     border-top: 1px solid var(--line);
     padding-top: 0.75rem;
+    margin-top: 1rem;
   }
   .log-entry {
     font-size: 0.8rem;

@@ -28,6 +28,8 @@
   type Props = {
     events: ECEvent[];
     open: boolean;
+    authenticated?: boolean;
+    loading?: boolean;
     onToggle: () => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
@@ -39,6 +41,8 @@
   let {
     events,
     open,
+    authenticated = true,
+    loading = false,
     onToggle,
     onEventClick,
     onEventDrop,
@@ -159,9 +163,18 @@
     <div class="panel-header">
       <div class="header-line">{headerStr}</div>
     </div>
-    <div class="calendar-wrap">
-      <Calendar plugins={calPlugins} {options} />
-    </div>
+    {#if loading}
+      <div class="panel-status">Connecting...</div>
+    {:else if !authenticated}
+      <div class="panel-status">
+        <p>Google Calendar not connected.</p>
+        <a class="connect-link" href="/api/auth/google">Connect</a>
+      </div>
+    {:else}
+      <div class="calendar-wrap">
+        <Calendar plugins={calPlugins} {options} />
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -232,6 +245,36 @@
     overflow: hidden;
     text-overflow: ellipsis;
     letter-spacing: 0.03em;
+  }
+
+  .panel-status {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1.5rem;
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--ink-soft);
+  }
+  .panel-status p {
+    margin: 0;
+  }
+  .connect-link {
+    display: inline-block;
+    padding: 0.4rem 1rem;
+    background: var(--accent);
+    color: var(--ink);
+    border-radius: 5px;
+    text-decoration: none;
+    font-size: 0.8rem;
+    font-weight: 500;
+    transition: opacity 150ms;
+  }
+  .connect-link:hover {
+    opacity: 0.8;
   }
 
   .calendar-wrap {

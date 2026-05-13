@@ -3,6 +3,12 @@
 # dependencies = [
 #   "PyQt6>=6.7",
 #   "PyQt6-WebEngine>=6.7",
+#   "fastapi>=0.115",
+#   "uvicorn>=0.34",
+#   "google-auth>=2.38",
+#   "google-auth-oauthlib>=1.2",
+#   "google-api-python-client>=2.166",
+#   "python-dotenv>=1.0",
 # ]
 # ///
 """Desktop calendar sidebar — always-on-top PyQt6 window.
@@ -16,8 +22,6 @@ Press Ctrl+Q or Escape to quit.
 
 import sys
 import threading
-import http.server
-import socket
 import ctypes
 from ctypes import byref, c_int
 from pathlib import Path
@@ -29,6 +33,7 @@ from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion
 
 
 _BUILD_DIR = Path(__file__).parent / "build"
+_API_PORT = 8765
 
 _INJECT_JS = r"""
 (function () {
@@ -56,25 +61,13 @@ _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_DONOTROUND = 1
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _serve(directory: Path, port: int) -> None:
-    class _H(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, directory=str(directory), **kw)
-
-        def log_message(self, *_):
-            pass
-
-    http.server.HTTPServer(("127.0.0.1", port), _H).serve_forever()
+def _start_server() -> None:
+    from server import run
+    run(_API_PORT)
 
 
 class CalendarWindow(QMainWindow):
-    def __init__(self, port: int) -> None:
+    def __init__(self) -> None:
         super().__init__()
 
         screen = QApplication.primaryScreen().availableGeometry()
@@ -94,14 +87,15 @@ class CalendarWindow(QMainWindow):
             screen.right() - _OPEN_W, screen.top(),
             _OPEN_W, screen.height(),
         )
-        # Mask to exact window rect — OS-level shape, no corners, no strip
         self.setMask(QRegion(0, 0, _OPEN_W, screen.height()))
 
         self._view = QWebEngineView(self)
         self._view.setGeometry(0, 0, _OPEN_W, screen.height())
         self._view.page().setBackgroundColor(QColor(0, 0, 0, 0))
         self._view.loadFinished.connect(self._on_loaded)
-        self._view.load(QUrl(f"http://127.0.0.1:{port}/"))
+
+        # Give uvicorn a moment to bind before the WebEngine makes its first request
+        QTimer.singleShot(900, lambda: self._view.load(QUrl(f"http://127.0.0.1:{_API_PORT}/")))
 
         # Poll the Svelte widget class list to track open/closed state
         self._poll_timer = QTimer(self)
@@ -138,10 +132,8 @@ class CalendarWindow(QMainWindow):
         """Shape the OS window to exactly the visible content — nothing more."""
         w, h = self.width(), self.height()
         if self._is_open:
-            # Full rectangle: panel + tab
             self.setMask(QRegion(0, 0, w, h))
         else:
-            # Just the tab button, vertically centered
             tab_y = (h - _TAB_H) // 2
             self.setMask(QRegion(0, tab_y, w, _TAB_H))
 
@@ -161,10 +153,8 @@ class CalendarWindow(QMainWindow):
             return
         self._is_open = is_open
         if is_open:
-            # Expand immediately — panel needs room before it animates out
             self._set_width(_OPEN_W)
         else:
-            # Let the 250ms CSS transition finish, then shrink + remask
             QTimer.singleShot(_CLOSE_DELAY_MS, lambda: self._set_width(_CLOSED_W))
 
 
@@ -173,13 +163,12 @@ def main() -> None:
         print("ERROR: build/ not found — run  npm run build  first.", file=sys.stderr)
         sys.exit(1)
 
-    port = _free_port()
-    threading.Thread(target=_serve, args=(_BUILD_DIR, port), daemon=True).start()
+    threading.Thread(target=_start_server, daemon=True).start()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
-    win = CalendarWindow(port)
+    win = CalendarWindow()
     win.show()
 
     sys.exit(app.exec())
