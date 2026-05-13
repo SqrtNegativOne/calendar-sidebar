@@ -6,3 +6,4 @@ build/
 .tokens.json
 data/
 .pyc
+__pycache__/

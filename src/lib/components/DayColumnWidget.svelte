@@ -361,4 +361,12 @@
   .calendar-wrap :global(.ec-remove-btn:hover) {
     opacity: 1 !important;
   }
+
+  .calendar-wrap :global(.ec-main) {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .calendar-wrap :global(.ec-main)::-webkit-scrollbar {
+    display: none;
+  }
 </style>
