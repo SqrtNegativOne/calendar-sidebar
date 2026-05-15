@@ -5,6 +5,7 @@
   let open = $state(true);
   let authenticated = $state(false);
   let loading = $state(true);
+  let error = $state(false);
   let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
@@ -29,12 +30,17 @@
     let interval: ReturnType<typeof setInterval>;
 
     (async () => {
-      const resp = await fetch('/api/auth/status');
-      const status = await resp.json() as { authenticated: boolean };
-      authenticated = status.authenticated;
-      loading = false;
+      try {
+        const resp = await fetch('/api/auth/status');
+        const status = await resp.json() as { authenticated: boolean };
+        authenticated = status.authenticated;
+      } catch {
+        error = true;
+      } finally {
+        loading = false;
+      }
 
-      if (!authenticated) return;
+      if (!authenticated || error) return;
 
       await fetchEvents();
       interval = setInterval(fetchEvents, 30_000);
@@ -116,6 +122,8 @@
   <h1>Calendar Sidebar</h1>
   {#if loading}
     <p>Connecting...</p>
+  {:else if error}
+    <p>Could not reach the backend. Is the server running?</p>
   {:else if !authenticated}
     <p>Connect your Google Calendar to get started.</p>
     <a class="connect-btn" href="/api/auth/google">Connect Google Calendar</a>
@@ -136,6 +144,7 @@
   {open}
   {authenticated}
   {loading}
+  {error}
   onToggle={handleToggle}
   onEventClick={handleEventClick}
   onEventDrop={handleEventDrop}

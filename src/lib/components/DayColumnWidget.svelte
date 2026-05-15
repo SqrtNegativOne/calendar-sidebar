@@ -30,6 +30,7 @@
     open: boolean;
     authenticated?: boolean;
     loading?: boolean;
+    error?: boolean;
     onToggle: () => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
@@ -43,6 +44,7 @@
     open,
     authenticated = true,
     loading = false,
+    error = false,
     onToggle,
     onEventClick,
     onEventDrop,
@@ -165,6 +167,8 @@
     </div>
     {#if loading}
       <div class="panel-status">Connecting...</div>
+    {:else if error}
+      <div class="panel-status">Backend unreachable</div>
     {:else if !authenticated}
       <div class="panel-status">
         <p>Google Calendar not connected.</p>
