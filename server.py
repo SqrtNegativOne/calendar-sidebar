@@ -7,6 +7,7 @@
 #   "google-auth-oauthlib>=1.2",
 #   "google-api-python-client>=2.166",
 #   "python-dotenv>=1.0",
+#   "loguru>=0.7",
 # ]
 # ///
 """Google Calendar OAuth2 + event sync backend.
@@ -30,6 +31,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build as gclient_build
+from loguru import logger
 from pydantic import BaseModel
 
 load_dotenv()
@@ -77,11 +79,17 @@ def _client_config() -> dict[str, Any]:
 
 def _load_tokens() -> dict[str, Any] | None:
     if not _TOKEN_FILE.exists():
+        logger.debug(f"Token file not found at {_TOKEN_FILE} — not yet authenticated")
         return None
     try:
         data = json.loads(_TOKEN_FILE.read_text())
+        if data:
+            logger.debug("Token file loaded")
+        else:
+            logger.debug("Token file is empty")
         return data if data else None
-    except Exception:
+    except Exception as exc:
+        logger.warning(f"Failed to read token file: {exc}")
         return None
 
 
@@ -100,6 +108,7 @@ def _save_tokens(token: str | None, refresh_token: str | None, expiry: str | Non
 def _get_credentials() -> Credentials | None:
     tokens = _load_tokens()
     if not tokens or (not tokens.get("token") and not tokens.get("refresh_token")):
+        logger.debug("No usable tokens — credentials unavailable")
         return None
 
     expiry: datetime | None = None
@@ -120,12 +129,18 @@ def _get_credentials() -> Credentials | None:
     )
 
     if not creds.valid and creds.refresh_token:
-        creds.refresh(Request())
-        _save_tokens(
-            token=creds.token,
-            refresh_token=creds.refresh_token,
-            expiry=creds.expiry.isoformat() if creds.expiry else None,
-        )
+        logger.info("Access token expired — refreshing via refresh token")
+        try:
+            creds.refresh(Request())
+            _save_tokens(
+                token=creds.token,
+                refresh_token=creds.refresh_token,
+                expiry=creds.expiry.isoformat() if creds.expiry else None,
+            )
+            logger.info("Credentials refreshed and saved")
+        except Exception as exc:
+            logger.error(f"Credential refresh failed: {exc}")
+            return None
 
     return creds
 
@@ -133,6 +148,7 @@ def _get_credentials() -> Credentials | None:
 def _require_creds() -> Credentials:
     creds = _get_credentials()
     if creds is None:
+        logger.warning("API request rejected — user not authenticated (visit /api/auth/google)")
         raise HTTPException(status_code=401, detail="Not authenticated")
     return creds
 
@@ -152,6 +168,7 @@ def _map_event(ev: dict[str, Any]) -> dict[str, str]:
 
 @app.get("/api/auth/google")
 def auth_google() -> RedirectResponse:
+    logger.info("OAuth flow initiated — redirecting to Google")
     flow = Flow.from_client_config(_client_config(), scopes=_SCOPES, redirect_uri=_redirect_uri())
     url, _ = flow.authorization_url(access_type="offline", prompt="consent")
     return RedirectResponse(url)
@@ -159,6 +176,7 @@ def auth_google() -> RedirectResponse:
 
 @app.get("/api/auth/callback")
 def auth_callback(code: str) -> RedirectResponse:
+    logger.info("OAuth callback received — exchanging code for tokens")
     flow = Flow.from_client_config(_client_config(), scopes=_SCOPES, redirect_uri=_redirect_uri())
     flow.fetch_token(code=code)
     creds = flow.credentials
@@ -167,19 +185,23 @@ def auth_callback(code: str) -> RedirectResponse:
         refresh_token=creds.refresh_token,
         expiry=creds.expiry.isoformat() if creds.expiry else None,
     )
+    logger.info("Authentication successful — tokens saved")
     return RedirectResponse("/")
 
 
 @app.get("/api/auth/status")
 def auth_status() -> dict[str, bool]:
     tokens = _load_tokens()
-    return {"authenticated": bool(tokens and (tokens.get("token") or tokens.get("refresh_token")))}
+    authenticated = bool(tokens and (tokens.get("token") or tokens.get("refresh_token")))
+    logger.debug(f"Auth status check: authenticated={authenticated}")
+    return {"authenticated": authenticated}
 
 
 # Event routes
 
 @app.get("/api/events")
 def list_events() -> list[dict[str, str]]:
+    logger.info("Fetching today's calendar events")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
 
@@ -199,11 +221,13 @@ def list_events() -> list[dict[str, str]]:
         .execute()
     )
 
-    return [
+    events = [
         _map_event(ev)
         for ev in result.get("items", [])
         if ev.get("id") and ev.get("start")
     ]
+    logger.info(f"Fetched {len(events)} event(s) for {day_start.date()}")
+    return events
 
 
 class EventBody(BaseModel):
@@ -216,6 +240,7 @@ class EventBody(BaseModel):
 
 @app.post("/api/events", status_code=201)
 def create_event(body: EventBody) -> dict[str, str]:
+    logger.info(f"Creating event: {body.title!r} ({body.start} -> {body.end})")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
     result = (
@@ -230,6 +255,7 @@ def create_event(body: EventBody) -> dict[str, str]:
         )
         .execute()
     )
+    logger.info(f"Event created: id={result.get('id')}")
     return _map_event(result)
 
 
@@ -243,6 +269,7 @@ class EventPatch(BaseModel):
 
 @app.patch("/api/events/{event_id}")
 def update_event(event_id: str, body: EventPatch) -> dict[str, str]:
+    logger.info(f"Updating event {event_id}")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
 
@@ -259,14 +286,17 @@ def update_event(event_id: str, body: EventPatch) -> dict[str, str]:
         .patch(calendarId=_calendar_id(), eventId=event_id, body=patch)
         .execute()
     )
+    logger.debug(f"Event {event_id} updated")
     return _map_event(result)
 
 
 @app.delete("/api/events/{event_id}", status_code=204)
 def delete_event(event_id: str) -> None:
+    logger.info(f"Deleting event {event_id}")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
     svc.events().delete(calendarId=_calendar_id(), eventId=event_id).execute()
+    logger.debug(f"Event {event_id} deleted")
 
 
 # SPA static file serving — must come last so API routes take priority
@@ -282,6 +312,15 @@ async def spa(full_path: str) -> FileResponse:
 def run(port: int = 8765) -> None:
     """Start the uvicorn server. Called by widget.py."""
     import uvicorn
+
+    try:
+        _client_id()
+        _client_secret()
+        logger.info("Google OAuth credentials found in environment")
+    except RuntimeError as exc:
+        logger.error(f"Missing Google OAuth config: {exc}")
+
+    logger.info(f"API server starting on http://127.0.0.1:{port}")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 

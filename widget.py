@@ -9,6 +9,7 @@
 #   "google-auth-oauthlib>=1.2",
 #   "google-api-python-client>=2.166",
 #   "python-dotenv>=1.0",
+#   "loguru>=0.7",
 # ]
 # ///
 """Desktop calendar sidebar — always-on-top PyQt6 window.
@@ -26,6 +27,7 @@ import ctypes
 from ctypes import byref, c_int
 from pathlib import Path
 
+from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import Qt, QUrl, QTimer
@@ -33,6 +35,7 @@ from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion
 
 
 _BUILD_DIR = Path(__file__).parent / "build"
+_LOG_FILE = Path(__file__).parent / "widget.log"
 _API_PORT = 8765
 
 _INJECT_JS = r"""
@@ -62,6 +65,7 @@ _DWMWCP_DONOTROUND = 1
 
 
 def _start_server() -> None:
+    logger.debug("Server thread starting")
     from server import run
     run(_API_PORT)
 
@@ -96,6 +100,7 @@ class CalendarWindow(QMainWindow):
 
         # Give uvicorn a moment to bind before the WebEngine makes its first request
         QTimer.singleShot(900, lambda: self._view.load(QUrl(f"http://127.0.0.1:{_API_PORT}/")))
+        logger.debug(f"UI will load from http://127.0.0.1:{_API_PORT}/ after 900 ms")
 
         # Poll the Svelte widget class list to track open/closed state
         self._poll_timer = QTimer(self)
@@ -119,8 +124,9 @@ class CalendarWindow(QMainWindow):
                 byref(c_int(_DWMWCP_DONOTROUND)),
                 4,
             )
-        except Exception:
-            pass
+            logger.debug("DWM rounded corners disabled")
+        except Exception as exc:
+            logger.warning(f"Could not disable DWM rounded corners: {exc}")
 
     def _set_width(self, w: int) -> None:
         s = self._screen
@@ -139,8 +145,14 @@ class CalendarWindow(QMainWindow):
 
     def _on_loaded(self, ok: bool) -> None:
         if ok:
+            logger.info("WebEngine page loaded successfully")
             QTimer.singleShot(80, lambda: self._view.page().runJavaScript(_INJECT_JS))
             QTimer.singleShot(120, self._poll_timer.start)
+        else:
+            logger.error(
+                f"WebEngine failed to load http://127.0.0.1:{_API_PORT}/ — "
+                "server may not have started in time"
+            )
 
     def _poll_open(self) -> None:
         self._view.page().runJavaScript(
@@ -152,6 +164,7 @@ class CalendarWindow(QMainWindow):
         if is_open == self._is_open:
             return
         self._is_open = is_open
+        logger.debug(f"Sidebar state changed: {'open' if is_open else 'closed'}")
         if is_open:
             self._set_width(_OPEN_W)
         else:
@@ -159,18 +172,24 @@ class CalendarWindow(QMainWindow):
 
 
 def main() -> None:
+    logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
+    logger.info("Calendar sidebar starting up")
+
     if not _BUILD_DIR.exists():
-        print("ERROR: build/ not found — run  npm run build  first.", file=sys.stderr)
+        logger.critical(f"Build directory not found: {_BUILD_DIR} — run  npm run build  first")
         sys.exit(1)
 
+    logger.info("Starting API server thread")
     threading.Thread(target=_start_server, daemon=True).start()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
+    logger.info("Creating main window")
     win = CalendarWindow()
     win.show()
 
+    logger.info("Entering Qt event loop")
     sys.exit(app.exec())
 
 
