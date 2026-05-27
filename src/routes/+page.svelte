@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import DayColumnWidget, { type ECEvent } from '$lib/components/DayColumnWidget.svelte';
+  import SidebarWidget, { type ECEvent } from '$lib/components/SidebarWidget.svelte';
 
   let open = $state(true);
   let authenticated = $state(false);
@@ -139,7 +139,7 @@
   {/if}
 </div>
 
-<DayColumnWidget
+<SidebarWidget
   {events}
   {open}
   {authenticated}

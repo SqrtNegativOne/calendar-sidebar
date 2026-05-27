@@ -1,5 +1,5 @@
 <!--
-  DayColumnWidget — floating day-column calendar sidebar.
+  SidebarWidget — floating day-column calendar and notes sidebar.
 
   Props (data in):
     events        ECEvent[]       items to display
@@ -16,6 +16,7 @@
 <script lang="ts">
   import { Calendar, TimeGrid, Interaction } from '@event-calendar/core';
   import '@event-calendar/core/index.css';
+  import { onMount } from 'svelte';
 
   export interface ECEvent {
     id: string;
@@ -56,6 +57,27 @@
   const now = new Date();
   const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+  // State for Notes
+  let showNotes = $state(false);
+  let notesText = $state('');
+
+  onMount(() => {
+    notesText = localStorage.getItem('notes_text') || '';
+    showNotes = localStorage.getItem('show_notes') === 'true';
+  });
+
+  $effect(() => {
+    localStorage.setItem('notes_text', notesText);
+  });
+
+  $effect(() => {
+    localStorage.setItem('show_notes', String(showNotes));
+  });
+
+  function toggleNotes() {
+    showNotes = !showNotes;
+  }
 
   function ordinal(n: number): string {
     const v = n % 100;
@@ -175,10 +197,22 @@
         <a class="connect-link" href="/api/auth/google">Connect</a>
       </div>
     {:else}
-      <div class="calendar-wrap">
+      <div class="calendar-wrap" class:half={showNotes}>
         <Calendar plugins={calPlugins} {options} />
       </div>
+      {#if showNotes}
+        <div class="notes-wrap">
+          <textarea
+            bind:value={notesText}
+            placeholder="Type notes here..."
+            class="notes-textarea"
+          ></textarea>
+        </div>
+      {/if}
     {/if}
+    <button class="notes-toggle-btn" onclick={toggleNotes} aria-label="Toggle notes" title="Toggle notes">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-square-pen"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.875.958.958-2.875a2 2 0 0 1 .506-.854z"/></svg>
+    </button>
   </div>
 </div>
 
@@ -230,6 +264,7 @@
     pointer-events: none;
     display: flex;
     flex-direction: column;
+    position: relative;
   }
   .open .panel {
     width: 280px;
@@ -285,6 +320,62 @@
     flex: 1;
     overflow: hidden;
     min-height: 0;
+    transition: height 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .calendar-wrap.half {
+    flex: none;
+    height: 50%;
+  }
+
+  .notes-wrap {
+    height: 50%;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    background: rgba(18, 18, 16, 0.95);
+    min-height: 0;
+  }
+
+  .notes-textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    padding: 12px;
+    padding-bottom: 38px;
+    padding-right: 38px;
+    resize: none;
+    font-size: 0.85rem;
+    font-family: inherit;
+    line-height: 1.5;
+    outline: none;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
+  }
+
+  .notes-toggle-btn {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 32px;
+    height: 32px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--line);
+    border-left: 1px solid var(--line);
+    border-bottom: none;
+    border-right: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--ink-soft);
+    z-index: 100;
+    transition: color 150ms, background 150ms;
+    pointer-events: auto;
+  }
+  .notes-toggle-btn:hover {
+    color: var(--ink);
+    background: var(--bg);
   }
 
   .calendar-wrap :global(.ec) {
