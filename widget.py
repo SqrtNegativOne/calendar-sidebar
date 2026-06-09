@@ -31,11 +31,12 @@ from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import Qt, QUrl, QTimer
-from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion, QIcon
 
 
 _BUILD_DIR = Path(__file__).parent / "build"
 _LOG_FILE = Path(__file__).parent / "widget.log"
+_ICON_FILE = Path(__file__).parent / "icon.png"
 _API_PORT = 8765
 
 _INJECT_JS = r"""
@@ -85,6 +86,9 @@ class CalendarWindow(QMainWindow):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("Calendar Sidebar")
+        if _ICON_FILE.exists():
+            self.setWindowIcon(QIcon(str(_ICON_FILE)))
 
         # Initial geometry — open state
         self.setGeometry(
@@ -172,6 +176,10 @@ class CalendarWindow(QMainWindow):
 
 
 def main() -> None:
+    if sys.platform == "win32":
+        # Set AppUserModelID so Windows groups this process correctly in the taskbar
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.calendar.sidebar.v1")
+
     logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
     logger.info("Calendar sidebar starting up")
 
