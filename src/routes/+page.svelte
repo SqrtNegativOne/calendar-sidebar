@@ -52,6 +52,31 @@
   function handleToggle() { open = !open; }
   function handleEventClick(_info: any) {}
 
+  async function handleSelect(info: any) {
+    const title = window.prompt('Task name:', 'New task');
+    if (!title) {
+      if (info.view?.calendar) info.view.calendar.unselect();
+      return;
+    }
+    const startStr = info.startStr ?? info.start?.toISOString();
+    const endStr = info.endStr ?? info.end?.toISOString();
+    const start = new Date(startStr);
+    const end = new Date(endStr);
+    try {
+      const resp = await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, start: start.toISOString(), end: end.toISOString() }),
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const newEv = await resp.json() as ECEvent;
+      events = [...events, newEv];
+      addLog(`Created task "${title}"`);
+    } catch (err) {
+      addLog(`Create failed: ${err}`);
+    }
+  }
+
   async function handleEventDrop(info: any) {
     const ev = info.event;
     const start = new Date(ev.start).toISOString();
@@ -150,6 +175,7 @@
   onEventDrop={handleEventDrop}
   onEventResize={handleEventResize}
   onDateClick={handleDateClick}
+  onSelect={handleSelect}
   onEventRemove={handleEventRemove}
 />
 

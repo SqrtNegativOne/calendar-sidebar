@@ -37,6 +37,7 @@
     onEventDrop: (info: any) => void;
     onEventResize: (info: any) => void;
     onDateClick: (info: any) => void;
+    onSelect: (info: any) => void;
     onEventRemove: (id: string) => void;
   };
 
@@ -51,6 +52,7 @@
     onEventDrop,
     onEventResize,
     onDateClick,
+    onSelect,
     onEventRemove
   }: Props = $props();
 
@@ -138,6 +140,7 @@
   function handleEventDrop(info: any) { onEventDrop(info); }
   function handleEventResize(info: any) { onEventResize(info); }
   function handleDateClick(info: any) { onDateClick(info); }
+  function handleSelect(info: any) { onSelect(info); }
 
   function handleSlotLabel(date: Date) {
     return String(date.getHours());
@@ -171,6 +174,7 @@
     eventDrop: handleEventDrop,
     eventResize: handleEventResize,
     dateClick: handleDateClick,
+    select: handleSelect,
     theme: (theme: any) => ({ ...theme, calendar: `${theme.calendar} ec-dark` }),
   });
 
@@ -230,8 +234,8 @@
 
   .tab {
     align-self: center;
-    width: 28px;
-    height: 80px;
+    width: 22px;
+    height: 64px;
     background: var(--bg-surface);
     border: 1px solid var(--line);
     border-right: none;

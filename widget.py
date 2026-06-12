@@ -51,11 +51,11 @@ _INJECT_JS = r"""
 })();
 """
 
-_OPEN_W  = 312   # tab(28) + panel(280) + 4px buffer
-_CLOSED_W = 32   # tab(28) + 4px buffer
+_OPEN_W  = 306   # tab(22) + panel(280) + 4px buffer
+_CLOSED_W = 26   # tab(22) + 4px buffer
 
-# Height of the toggle tab button — must match the CSS .tab { height: 80px }
-_TAB_H = 80
+# Height of the toggle tab button — must match the CSS .tab { height: 64px }
+_TAB_H = 64
 
 # Must exceed the Svelte close-transition duration (250 ms)
 _CLOSE_DELAY_MS = 300
@@ -159,6 +159,13 @@ class CalendarWindow(QMainWindow):
             )
 
     def _poll_open(self) -> None:
+        try:
+            hwnd = int(self.winId())
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010
+            )
+        except Exception:
+            pass
         self._view.page().runJavaScript(
             "!!document.querySelector('.widget.open')",
             self._on_open_state,
