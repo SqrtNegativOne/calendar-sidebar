@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+_LOG_FILE = Path(__file__).parent / "log" / "server.log"
 _BUILD_DIR = Path(__file__).parent / "build"
 _TOKEN_FILE = Path(__file__).parent / ".tokens.json"
 _SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
@@ -58,7 +59,7 @@ def _client_secret() -> str:
 
 
 def _redirect_uri() -> str:
-    return os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8765/api/auth/callback")
+    return os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8764/api/auth/callback")
 
 
 def _calendar_id() -> str:
@@ -309,7 +310,7 @@ async def spa(full_path: str) -> FileResponse:
     return FileResponse(str(_BUILD_DIR / "index.html"))
 
 
-def run(port: int = 8765) -> None:
+def run(port: int = 8764) -> None:
     """Start the uvicorn server. Called by widget.py."""
     import uvicorn
 
@@ -325,4 +326,5 @@ def run(port: int = 8765) -> None:
 
 
 if __name__ == "__main__":
+    logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
     run()

@@ -31,7 +31,7 @@ Declared inline in the `# /// script` block at the top of each `.py` file — `u
 ## Google OAuth setup
 
 1. Create an OAuth 2.0 credential in Google Cloud Console (type: web application).
-2. Add `http://localhost:8765/api/auth/callback` as an authorised redirect URI.
+2. Add `http://localhost:8764/api/auth/callback` as an authorised redirect URI.
 3. Copy `.env.example` to `.env` and fill in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
 4. Open the app and navigate to `/api/auth/google` to complete the first-time auth flow.
 

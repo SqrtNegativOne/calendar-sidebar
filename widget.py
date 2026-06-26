@@ -35,9 +35,9 @@ from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion, QIcon
 
 
 _BUILD_DIR = Path(__file__).parent / "build"
-_LOG_FILE = Path(__file__).parent / "widget.log"
+_LOG_FILE = Path(__file__).parent / "log" / "widget.log"
 _ICON_FILE = Path(__file__).parent / "icon.png"
-_API_PORT = 8765
+_API_PORT = 8764
 
 _INJECT_JS = r"""
 (function () {
