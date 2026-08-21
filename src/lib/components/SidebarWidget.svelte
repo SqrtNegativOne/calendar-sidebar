@@ -4,6 +4,7 @@
   Props (data in):
     events        ECEvent[]       items to display
     open          boolean         whether the panel is expanded
+    syncError     boolean         last sync attempt failed
 
   Callbacks (events out):
     onToggle()
@@ -11,6 +12,8 @@
     onEventDrop(info)
     onEventResize(info)
     onDateClick(info)
+    onSelect(info)
+    onEventRename(id, title)
     onEventRemove(id)
 -->
 <script lang="ts">
@@ -23,6 +26,7 @@
     title: string;
     start: string;
     end: string;
+    allDay?: boolean;
     color?: string;
   }
 
@@ -32,12 +36,14 @@
     authenticated?: boolean;
     loading?: boolean;
     error?: boolean;
+    syncError?: boolean;
     onToggle: () => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
     onEventResize: (info: any) => void;
     onDateClick: (info: any) => void;
     onSelect: (info: any) => void;
+    onEventRename: (id: string, title: string) => void;
     onEventRemove: (id: string) => void;
   };
 
@@ -47,12 +53,14 @@
     authenticated = true,
     loading = false,
     error = false,
+    syncError = false,
     onToggle,
     onEventClick,
     onEventDrop,
     onEventResize,
     onDateClick,
     onSelect,
+    onEventRename,
     onEventRemove
   }: Props = $props();
 
@@ -120,11 +128,12 @@
   }
 
   function handleEventContent(info: any) {
-    const start = toDate(info.event.start);
-    const end = toDate(info.event.end);
-    const timeStr = `${formatTime(start)} – ${formatTime(end)}`;
+    const timeStr = info.event.allDay
+      ? 'All day'
+      : `${formatTime(toDate(info.event.start))} – ${formatTime(toDate(info.event.end))}`;
     const removeBtn = `<button class="ec-remove-btn" data-event-id="${info.event.id}" title="Remove">×</button>`;
-    return { html: `<div class="ec-custom-event"><div class="ec-custom-title">${info.event.title} ${removeBtn}</div><div class="ec-custom-time">${timeStr}</div></div>` };
+    const title = `<span class="ec-title-text">${info.event.title}</span>`;
+    return { html: `<div class="ec-custom-event"><div class="ec-custom-title" data-event-id="${info.event.id}">${title} ${removeBtn}</div><div class="ec-custom-time">${timeStr}</div></div>` };
   }
 
   function handleEventClick(info: any) {
@@ -149,11 +158,17 @@
   const calPlugins = [TimeGrid, Interaction];
   const scrollH = Math.max(6, now.getHours() - 2);
 
+  // The all-day slot is disabled in this layout, so all-day events must be
+  // fed to the calendar without the allDay flag — they render as timed
+  // events (00:00 → next midnight) instead. `events` keeps the flag for
+  // the "All day" label in handleEventContent.
+  let calEvents = $derived(events.map(({ allDay: _allDay, ...rest }) => rest));
+
   // svelte-ignore state_referenced_locally
   let options = $state({
     view: 'timeGridDay',
     height: '100%',
-    events: events,
+    events: calEvents,
     editable: true,
     selectable: true,
     nowIndicator: true,
@@ -179,15 +194,67 @@
   });
 
   $effect(() => {
-    options.events = events;
+    options.events = calEvents;
   });
+
+  // Inline title editing — double-click a task name to edit it in place
+  let panelEl: HTMLElement | undefined = $state();
+  let inputEl: HTMLInputElement | undefined = $state();
+  let editor = $state<{ id: string; title: string; x: number; y: number; w: number } | null>(null);
+  let editorCancelled = false;
+
+  $effect(() => {
+    if (editor && inputEl) {
+      inputEl.focus();
+      inputEl.select();
+    }
+  });
+
+  function handlePanelDblClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    const titleEl = target.closest('.ec-custom-title') as HTMLElement | null;
+    if (!titleEl || !panelEl) return;
+    const id = titleEl.getAttribute('data-event-id');
+    const ev = events.find((e2) => e2.id === id);
+    if (!id || !ev) return;
+
+    const panelRect = panelEl.getBoundingClientRect();
+    const rect = titleEl.getBoundingClientRect();
+    // Both rects are viewport-relative, so the difference positions the
+    // input exactly over the title even when the grid is scrolled
+    editorCancelled = false;
+    editor = {
+      id,
+      title: ev.title,
+      x: rect.left - panelRect.left,
+      y: rect.top - panelRect.top,
+      w: Math.max(80, rect.width)
+    };
+  }
+
+  function commitEditor() {
+    if (!editor) return;
+    if (!editorCancelled) onEventRename(editor.id, editor.title);
+    editor = null;
+  }
+
+  function handleEditorKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      (e.target as HTMLInputElement).blur();
+    } else if (e.key === 'Escape') {
+      editorCancelled = true;
+      (e.target as HTMLInputElement).blur();
+    }
+  }
 </script>
 
 <div class="widget" class:open>
   <button class="tab" onclick={onToggle} aria-label="Toggle day column">
     <span class="arrow">{open ? '›' : '‹'}</span>
   </button>
-  <div class="panel">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="panel" bind:this={panelEl} ondblclick={handlePanelDblClick}>
     <div class="panel-header">
       <div class="header-line">{headerStr}</div>
     </div>
@@ -201,6 +268,9 @@
         <a class="connect-link" href="/api/auth/google">Connect</a>
       </div>
     {:else}
+      {#if syncError}
+        <div class="sync-error">Sync failed &mdash; retrying&hellip;</div>
+      {/if}
       <div class="calendar-wrap" class:half={showNotes}>
         <Calendar plugins={calPlugins} {options} />
       </div>
@@ -212,6 +282,18 @@
             class="notes-textarea"
           ></textarea>
         </div>
+      {/if}
+      {#if editor}
+        <input
+          class="title-editor"
+          style="left:{editor.x}px; top:{editor.y}px; width:{editor.w}px"
+          bind:value={editor.title}
+          bind:this={inputEl}
+          onkeydown={handleEditorKey}
+          onblur={commitEditor}
+          onclick={(e) => e.stopPropagation()}
+          ondblclick={(e) => e.stopPropagation()}
+        />
       {/if}
     {/if}
     <button class="notes-toggle-btn" onclick={toggleNotes} aria-label="Toggle notes" title="Toggle notes">
@@ -318,6 +400,30 @@
   }
   .connect-link:hover {
     opacity: 0.8;
+  }
+
+  .sync-error {
+    padding: 4px 12px;
+    font-size: 0.7rem;
+    color: #e8a09a;
+    background: rgba(204, 95, 84, 0.15);
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+
+  .title-editor {
+    position: absolute;
+    z-index: 200;
+    padding: 0 2px;
+    background: var(--bg-surface);
+    color: var(--ink);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    font-family: inherit;
+    line-height: 1.3;
+    outline: none;
   }
 
   .calendar-wrap {

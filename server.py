@@ -1,28 +1,20 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#   "fastapi>=0.115",
-#   "uvicorn>=0.34",
-#   "google-auth>=2.38",
-#   "google-auth-oauthlib>=1.2",
-#   "google-api-python-client>=2.166",
-#   "python-dotenv>=1.0",
-#   "loguru>=0.7",
-# ]
-# ///
 """Google Calendar OAuth2 + event sync backend.
 
 Run standalone for testing:
   uv run server.py
 
 Normally started by widget.py automatically.
+
+Dependencies are declared in pyproject.toml (installed via uv).
 """
 
 import json
 import os
-from datetime import datetime, timezone, timedelta
+import socket
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -103,7 +95,10 @@ def _save_tokens(token: str | None, refresh_token: str | None, expiry: str | Non
         updated["refresh_token"] = refresh_token
     if expiry is not None:
         updated["expiry"] = expiry
-    _TOKEN_FILE.write_text(json.dumps(updated, indent=2))
+    # Atomic write so a crash mid-save can't corrupt the token file
+    tmp = _TOKEN_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(updated, indent=2))
+    tmp.replace(_TOKEN_FILE)
 
 
 def _get_credentials() -> Credentials | None:
@@ -154,14 +149,16 @@ def _require_creds() -> Credentials:
     return creds
 
 
-def _map_event(ev: dict[str, Any]) -> dict[str, str]:
+def _map_event(ev: dict[str, Any]) -> dict[str, Any]:
     start = ev.get("start", {})
     end = ev.get("end", {})
+    all_day = "date" in start
     return {
         "id": ev["id"],
         "title": ev.get("summary", "(no title)"),
         "start": start.get("dateTime") or f"{start.get('date')}T00:00:00",
         "end": end.get("dateTime") or f"{end.get('date')}T00:00:00",
+        "allDay": all_day,
     }
 
 
@@ -201,13 +198,15 @@ def auth_status() -> dict[str, bool]:
 # Event routes
 
 @app.get("/api/events")
-def list_events() -> list[dict[str, str]]:
+def list_events() -> list[dict[str, Any]]:
     logger.info("Fetching today's calendar events")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
 
-    now = datetime.now(timezone.utc)
-    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    # Day boundaries in the machine's local timezone, not UTC — otherwise
+    # the window drifts by hours for anyone west/east of Greenwich
+    now = datetime.now().astimezone()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
 
     result = (
@@ -240,7 +239,7 @@ class EventBody(BaseModel):
 
 
 @app.post("/api/events", status_code=201)
-def create_event(body: EventBody) -> dict[str, str]:
+def create_event(body: EventBody) -> dict[str, Any]:
     logger.info(f"Creating event: {body.title!r} ({body.start} -> {body.end})")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
@@ -269,7 +268,7 @@ class EventPatch(BaseModel):
 
 
 @app.patch("/api/events/{event_id}")
-def update_event(event_id: str, body: EventPatch) -> dict[str, str]:
+def update_event(event_id: str, body: EventPatch) -> dict[str, Any]:
     logger.info(f"Updating event {event_id}")
     creds = _require_creds()
     svc = gclient_build("calendar", "v3", credentials=creds)
@@ -310,9 +309,35 @@ async def spa(full_path: str) -> FileResponse:
     return FileResponse(str(_BUILD_DIR / "index.html"))
 
 
-def run(port: int = 8764) -> None:
-    """Start the uvicorn server. Called by widget.py."""
+def find_free_port(preferred: int = 8764) -> int:
+    """Return `preferred` if free, otherwise scan upward for the first free port."""
+    for port in range(preferred, preferred + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise RuntimeError(f"No free port found near {preferred}")
+
+
+def create_server(port: int):
+    """Build (but don't start) a uvicorn server. Returns the handle so callers
+    can request a graceful shutdown via `server.should_exit = True`."""
     import uvicorn
+
+    redirect_port = urlparse(_redirect_uri()).port
+    if redirect_port is not None and redirect_port != port:
+        logger.warning(
+            f"Server will run on port {port} but GOOGLE_REDIRECT_URI points at "
+            f"port {redirect_port} — the OAuth login flow may fail until tokens "
+            "exist or GOOGLE_REDIRECT_URI is updated"
+        )
+    return uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    )
+
+
+def run(server) -> None:
+    """Start the given uvicorn server. Blocks until shutdown. Called by widget.py."""
+    logger.info(f"API server starting on http://127.0.0.1:{server.config.port}")
 
     try:
         _client_id()
@@ -321,10 +346,9 @@ def run(port: int = 8764) -> None:
     except RuntimeError as exc:
         logger.error(f"Missing Google OAuth config: {exc}")
 
-    logger.info(f"API server starting on http://127.0.0.1:{port}")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    server.run()
 
 
 if __name__ == "__main__":
     logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
-    run()
+    run(create_server(find_free_port()))

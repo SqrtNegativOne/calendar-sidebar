@@ -1,24 +1,12 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#   "PyQt6>=6.7",
-#   "PyQt6-WebEngine>=6.7",
-#   "fastapi>=0.115",
-#   "uvicorn>=0.34",
-#   "google-auth>=2.38",
-#   "google-auth-oauthlib>=1.2",
-#   "google-api-python-client>=2.166",
-#   "python-dotenv>=1.0",
-#   "loguru>=0.7",
-# ]
-# ///
 """Desktop calendar sidebar — always-on-top PyQt6 window.
 
 Usage:
-  1. npm run build          (build the Svelte app once)
+  1. bun run build          (build the Svelte app once)
   2. uv run widget.py       (uv installs deps automatically, then launches)
 
-Press Ctrl+Q or Escape to quit.
+Press Ctrl+Q or Escape to quit, or use the tray icon menu.
+
+Dependencies are declared in pyproject.toml (installed via uv).
 """
 
 import sys
@@ -28,16 +16,27 @@ from ctypes import byref, c_int
 from pathlib import Path
 
 from loguru import logger
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtCore import Qt, QUrl, QTimer
-from PyQt6.QtGui import QColor, QKeySequence, QShortcut, QRegion, QIcon
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QShortcut,
+    QRegion,
+)
+from PyQt6.QtNetwork import (
+    QNetworkAccessManager,
+    QNetworkReply,
+    QNetworkRequest,
+)
 
 
 _BUILD_DIR = Path(__file__).parent / "build"
 _LOG_FILE = Path(__file__).parent / "log" / "widget.log"
 _ICON_FILE = Path(__file__).parent / "icon.png"
-_API_PORT = 8764
 
 _INJECT_JS = r"""
 (function () {
@@ -65,20 +64,25 @@ _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_DONOTROUND = 1
 
 
-def _start_server() -> None:
-    logger.debug("Server thread starting")
+def _start_server(server) -> None:
     from server import run
-    run(_API_PORT)
+
+    logger.debug("Server thread starting")
+    run(server)
 
 
 class CalendarWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, api_port: int, server) -> None:
         super().__init__()
+        self._port = api_port
+        self._server = server
 
         screen = QApplication.primaryScreen().availableGeometry()
         self._screen = screen
         # Matches Svelte's initial open = $state(true)
         self._is_open: bool = True
+        self._page_loaded: bool = False
+        self._ready_check_inflight: bool = False
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -102,9 +106,16 @@ class CalendarWindow(QMainWindow):
         self._view.page().setBackgroundColor(QColor(0, 0, 0, 0))
         self._view.loadFinished.connect(self._on_loaded)
 
-        # Give uvicorn a moment to bind before the WebEngine makes its first request
-        QTimer.singleShot(900, lambda: self._view.load(QUrl(f"http://127.0.0.1:{_API_PORT}/")))
-        logger.debug(f"UI will load from http://127.0.0.1:{_API_PORT}/ after 900 ms")
+        # Poll until uvicorn has bound its port, then load the SPA — no fixed
+        # sleep, so startup is fast when the server is quick and reliable
+        # even when it is slow
+        self._base_url = f"http://127.0.0.1:{api_port}"
+        self._net = QNetworkAccessManager(self)
+        self._ready_timer = QTimer(self)
+        self._ready_timer.setInterval(150)
+        self._ready_timer.timeout.connect(self._check_server_ready)
+        self._ready_timer.start()
+        logger.debug(f"Waiting for API server at {self._base_url} before loading UI")
 
         # Poll the Svelte widget class list to track open/closed state
         self._poll_timer = QTimer(self)
@@ -113,6 +124,44 @@ class CalendarWindow(QMainWindow):
 
         for seq in ("Ctrl+Q", "Escape"):
             QShortcut(QKeySequence(seq), self).activated.connect(QApplication.quit)
+
+        self._build_tray()
+
+    def _build_tray(self) -> None:
+        """System tray icon with show/hide + quit actions."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray not available — tray icon skipped")
+            return
+        icon = QIcon(str(_ICON_FILE)) if _ICON_FILE.exists() else QIcon()
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("Calendar Sidebar")
+
+        menu = QMenu()
+        act_toggle = QAction("Show / Hide sidebar", menu)
+        act_toggle.triggered.connect(self._toggle_visible)
+        act_quit = QAction("Quit", menu)
+        act_quit.triggered.connect(QApplication.quit)
+        menu.addAction(act_toggle)
+        menu.addSeparator()
+        menu.addAction(act_quit)
+
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+        logger.debug("Tray icon created")
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        # Left-click on the tray icon also toggles the window
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._toggle_visible()
+
+    def _toggle_visible(self) -> None:
+        if self.isVisible():
+            self.hide()
+            logger.debug("Window hidden via tray")
+        else:
+            self.show()
+            logger.debug("Window shown via tray")
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -147,6 +196,28 @@ class CalendarWindow(QMainWindow):
             tab_y = (h - _TAB_H) // 2
             self.setMask(QRegion(0, tab_y, w, _TAB_H))
 
+    def _check_server_ready(self) -> None:
+        if self._page_loaded or self._ready_check_inflight:
+            return
+        self._ready_check_inflight = True
+        url = QUrl(f"{self._base_url}/api/auth/status")
+        reply = self._net.get(QNetworkRequest(url))
+        reply.finished.connect(lambda: self._on_ready_check(reply))
+
+    def _on_ready_check(self, reply: QNetworkReply) -> None:
+        ok = reply.error() == QNetworkReply.NetworkError.NoError
+        reply.deleteLater()
+        self._ready_check_inflight = False
+        if self._page_loaded:
+            return
+        if ok:
+            logger.info("API server is up — loading UI")
+            self._ready_timer.stop()
+            self._page_loaded = True
+            self._view.load(QUrl(f"{self._base_url}/"))
+        else:
+            logger.debug("API server not ready yet — retrying")
+
     def _on_loaded(self, ok: bool) -> None:
         if ok:
             logger.info("WebEngine page loaded successfully")
@@ -154,8 +225,7 @@ class CalendarWindow(QMainWindow):
             QTimer.singleShot(120, self._poll_timer.start)
         else:
             logger.error(
-                f"WebEngine failed to load http://127.0.0.1:{_API_PORT}/ — "
-                "server may not have started in time"
+                f"WebEngine failed to load {self._base_url}/ — server may have died"
             )
 
     def _poll_open(self) -> None:
@@ -182,6 +252,15 @@ class CalendarWindow(QMainWindow):
             QTimer.singleShot(_CLOSE_DELAY_MS, lambda: self._set_width(_CLOSED_W))
 
 
+    def shutdown(self) -> None:
+        """Stop timers and ask uvicorn for a graceful shutdown."""
+        self._ready_timer.stop()
+        self._poll_timer.stop()
+        if self._server is not None:
+            logger.info("Requesting API server shutdown")
+            self._server.should_exit = True
+
+
 def main() -> None:
     if sys.platform == "win32":
         # Set AppUserModelID so Windows groups this process correctly in the taskbar
@@ -191,17 +270,22 @@ def main() -> None:
     logger.info("Calendar sidebar starting up")
 
     if not _BUILD_DIR.exists():
-        logger.critical(f"Build directory not found: {_BUILD_DIR} — run  npm run build  first")
+        logger.critical(f"Build directory not found: {_BUILD_DIR} — run  bun run build  first")
         sys.exit(1)
 
-    logger.info("Starting API server thread")
-    threading.Thread(target=_start_server, daemon=True).start()
+    from server import create_server, find_free_port
+
+    port = find_free_port()
+    server = create_server(port)
+    logger.info(f"Starting API server thread on port {port}")
+    threading.Thread(target=_start_server, args=(server,), daemon=True).start()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
     logger.info("Creating main window")
-    win = CalendarWindow()
+    win = CalendarWindow(port, server)
+    app.aboutToQuit.connect(win.shutdown)
     win.show()
 
     logger.info("Entering Qt event loop")

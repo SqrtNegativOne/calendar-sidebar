@@ -2,10 +2,13 @@
   import { onMount } from 'svelte';
   import SidebarWidget, { type ECEvent } from '$lib/components/SidebarWidget.svelte';
 
+  const POLL_MS = 30_000;
+
   let open = $state(true);
   let authenticated = $state(false);
   let loading = $state(true);
   let error = $state(false);
+  let syncError = $state(false);
   let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
@@ -17,22 +20,53 @@
     try {
       const resp = await fetch('/api/events');
       if (!resp.ok) {
-        if (resp.status === 401) { authenticated = false; return; }
+        if (resp.status === 401) {
+          authenticated = false;
+          return;
+        }
         throw new Error(`${resp.status}`);
       }
-      events = await resp.json() as ECEvent[];
-    } catch (err) {
-      addLog(`Sync error: ${err}`);
+      events = (await resp.json()) as ECEvent[];
+      syncError = false;
+    } catch {
+      syncError = true;
     }
   }
 
+  let interval: ReturnType<typeof setInterval> | undefined;
+
+  function startPolling() {
+    if (interval) return;
+    interval = setInterval(pollTick, POLL_MS);
+  }
+
+  function stopPolling() {
+    clearInterval(interval);
+    interval = undefined;
+  }
+
+  // Only hit the API while the calendar panel is actually on screen
+  function pollTick() {
+    if (!open || document.hidden) return;
+    fetchEvents();
+  }
+
+  function handleVisibilityChange() {
+    if (!document.hidden && open && authenticated) fetchEvents();
+  }
+
+  // Token expired mid-session — drop back to the reconnect prompt
+  $effect(() => {
+    if (!authenticated) stopPolling();
+  });
+
   onMount(() => {
-    let interval: ReturnType<typeof setInterval>;
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     (async () => {
       try {
         const resp = await fetch('/api/auth/status');
-        const status = await resp.json() as { authenticated: boolean };
+        const status = (await resp.json()) as { authenticated: boolean };
         authenticated = status.authenticated;
       } catch {
         error = true;
@@ -43,13 +77,20 @@
       if (!authenticated || error) return;
 
       await fetchEvents();
-      interval = setInterval(fetchEvents, 30_000);
+      startPolling();
     })();
 
-    return () => clearInterval(interval);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
+    };
   });
 
-  function handleToggle() { open = !open; }
+  function handleToggle() {
+    open = !open;
+    // Catch up on anything missed while the sidebar was closed
+    if (open && authenticated) fetchEvents();
+  }
   function handleEventClick(_info: any) {}
 
   async function handleSelect(info: any) {
@@ -129,6 +170,24 @@
     }
   }
 
+  async function handleEventRename(id: string, title: string) {
+    const trimmed = title.trim();
+    const ev = events.find(e => e.id === id);
+    if (!ev || !trimmed || ev.title === trimmed) return;
+    events = events.map(e => (e.id === id ? { ...e, title: trimmed } : e));
+    addLog(`Renamed "${ev.title}" to "${trimmed}"`);
+    try {
+      const resp = await fetch(`/api/events/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (!resp.ok) throw new Error(`${resp.status}`);
+    } catch {
+      await fetchEvents();
+    }
+  }
+
   async function handleEventRemove(id: string) {
     const ev = events.find(e => e.id === id);
     events = events.filter(e => e.id !== id);
@@ -170,12 +229,14 @@
   {authenticated}
   {loading}
   {error}
+  {syncError}
   onToggle={handleToggle}
   onEventClick={handleEventClick}
   onEventDrop={handleEventDrop}
   onEventResize={handleEventResize}
   onDateClick={handleDateClick}
   onSelect={handleSelect}
+  onEventRename={handleEventRename}
   onEventRemove={handleEventRemove}
 />
 
