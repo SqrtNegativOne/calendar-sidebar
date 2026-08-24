@@ -64,7 +64,7 @@
     onEventRemove
   }: Props = $props();
 
-  const now = new Date();
+  let now = $state(new Date());
   const dayNames = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -75,6 +75,19 @@
   onMount(() => {
     notesText = localStorage.getItem('notes_text') || '';
     showNotes = localStorage.getItem('show_notes') === 'true';
+
+    const onVisChange = () => {
+      if (!document.hidden) now = new Date();
+    };
+    document.addEventListener('visibilitychange', onVisChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisChange);
+    };
+  });
+
+  $effect(() => {
+    if (open) now = new Date();
   });
 
   $effect(() => {
@@ -102,7 +115,7 @@
     return Math.ceil(((utc.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
   }
 
-  const headerStr = `${ordinal(now.getDate())} ${monthNames[now.getMonth()]} ${now.getFullYear()} ⋅ ${dayNames[now.getDay()].slice(0, 3)} ⋅ Week #${isoWeek(now)}`;
+  let headerStr = $derived(`${ordinal(now.getDate())} ${monthNames[now.getMonth()]} ${now.getFullYear()} ⋅ ${dayNames[now.getDay()].slice(0, 3)} ⋅ Week #${isoWeek(now)}`);
 
   function getDurationMinutes(event: any): number {
     const s = event.start instanceof Date ? event.start : new Date(event.start);
@@ -156,7 +169,7 @@
   }
 
   const calPlugins = [TimeGrid, Interaction];
-  const scrollH = Math.max(6, now.getHours() - 2);
+  const scrollH = Math.max(6, new Date().getHours() - 2);
 
   // The all-day slot is disabled in this layout, so all-day events must be
   // fed to the calendar without the allDay flag — they render as timed
@@ -167,6 +180,7 @@
   // svelte-ignore state_referenced_locally
   let options = $state({
     view: 'timeGridDay',
+    date: now,
     height: '100%',
     events: calEvents,
     editable: true,
@@ -195,6 +209,7 @@
 
   $effect(() => {
     options.events = calEvents;
+    options.date = now;
   });
 
   // Inline title editing — double-click a task name to edit it in place
