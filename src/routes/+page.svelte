@@ -3,6 +3,8 @@
   import SidebarWidget, { type ECEvent } from '$lib/components/SidebarWidget.svelte';
 
   const POLL_MS = 30_000;
+  const RETRY_MS = 3_000;
+  const MAX_STARTUP_RETRIES = 10;
 
   let open = $state(true);
   let authenticated = $state(false);
@@ -34,6 +36,39 @@
   }
 
   let interval: ReturnType<typeof setInterval> | undefined;
+  let statusInterval: ReturnType<typeof setInterval> | undefined;
+
+  async function checkStatus(): Promise<boolean> {
+    try {
+      const resp = await fetch('/api/auth/status');
+      if (!resp.ok) throw new Error(`${resp.status}`);
+      const status = (await resp.json()) as { authenticated: boolean };
+      authenticated = status.authenticated;
+      error = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // While the backend is down, keep probing so the panel recovers on its own
+  // instead of showing "Backend unreachable" until a manual reload.
+  function watchStatus() {
+    if (statusInterval) return;
+    statusInterval = setInterval(async () => {
+      if (!(await checkStatus())) return;
+      stopStatusWatch();
+      if (authenticated) {
+        await fetchEvents();
+        startPolling();
+      }
+    }, RETRY_MS);
+  }
+
+  function stopStatusWatch() {
+    clearInterval(statusInterval);
+    statusInterval = undefined;
+  }
 
   function startPolling() {
     if (interval) return;
@@ -64,17 +99,19 @@
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     (async () => {
-      try {
-        const resp = await fetch('/api/auth/status');
-        const status = (await resp.json()) as { authenticated: boolean };
-        authenticated = status.authenticated;
-      } catch {
-        error = true;
-      } finally {
-        loading = false;
+      let reachable = false;
+      for (let attempt = 0; attempt < MAX_STARTUP_RETRIES && !reachable; attempt++) {
+        reachable = await checkStatus();
+        if (!reachable) await new Promise((r) => setTimeout(r, RETRY_MS));
       }
+      loading = false;
 
-      if (!authenticated || error) return;
+      if (!reachable) {
+        error = true;
+        watchStatus();
+        return;
+      }
+      if (!authenticated) return;
 
       await fetchEvents();
       startPolling();
@@ -83,6 +120,7 @@
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopPolling();
+      stopStatusWatch();
     };
   });
 
@@ -125,11 +163,14 @@
     events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
     addLog(`Moved "${ev.title}" to ${new Date(ev.start).toLocaleTimeString()}`);
     try {
-      await fetch(`/api/events/${ev.id}`, {
+      const resp = await fetch(`/api/events/${ev.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ start, end }),
       });
+      // fetch() does not throw on 4xx/5xx — surface it so the optimistic
+      // update is rolled back by refetching.
+      if (!resp.ok) throw new Error(`${resp.status}`);
     } catch {
       await fetchEvents();
     }
@@ -142,11 +183,12 @@
     events = events.map(e => e.id === ev.id ? { ...e, start, end } : e);
     addLog(`Resized "${ev.title}" ends ${new Date(ev.end).toLocaleTimeString()}`);
     try {
-      await fetch(`/api/events/${ev.id}`, {
+      const resp = await fetch(`/api/events/${ev.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ start, end }),
       });
+      if (!resp.ok) throw new Error(`${resp.status}`);
     } catch {
       await fetchEvents();
     }

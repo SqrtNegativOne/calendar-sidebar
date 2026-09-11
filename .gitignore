@@ -1,11 +1,12 @@
 node_modules/
 .svelte-kit/
 build/
+.venv/
 .env
 .env.local
-.tokens.json
+.tokens.json*
 data/
-.pyc
+*.pyc
 __pycache__/
 *.log
 .antigravitycli/

@@ -4,7 +4,8 @@ Usage:
   1. bun run build          (build the Svelte app once)
   2. uv run widget.py       (uv installs deps automatically, then launches)
 
-Press Ctrl+Q or Escape to quit, or use the tray icon menu.
+Press Ctrl+Q to quit, or use the tray icon menu. Escape is left to the
+web UI (e.g. cancelling the inline title editor).
 
 Dependencies are declared in pyproject.toml (installed via uv).
 """
@@ -59,6 +60,15 @@ _TAB_H = 64
 # Must exceed the Svelte close-transition duration (250 ms)
 _CLOSE_DELAY_MS = 300
 
+# UI load retry: exponential backoff from 1 s, capped at 30 s
+_MAX_LOAD_ATTEMPTS = 5
+_RETRY_BASE_MS = 1000
+_RETRY_MAX_MS = 30_000
+
+# Windows per-session named mutex — released automatically on process exit
+_ERROR_ALREADY_EXISTS = 183
+_MUTEX_NAME = "Local\\CalendarSidebarSingleInstance"
+
 # Windows DWM: disable rounded corners
 _DWMWA_WINDOW_CORNER_PREFERENCE = 33
 _DWMWCP_DONOTROUND = 1
@@ -69,6 +79,14 @@ def _start_server(server) -> None:
 
     logger.debug("Server thread starting")
     run(server)
+
+
+def _acquire_single_instance() -> bool:
+    """True if no other instance already owns the per-session named mutex."""
+    if sys.platform != "win32":
+        return True
+    ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    return ctypes.windll.kernel32.GetLastError() != _ERROR_ALREADY_EXISTS
 
 
 class CalendarWindow(QMainWindow):
@@ -83,6 +101,9 @@ class CalendarWindow(QMainWindow):
         self._is_open: bool = True
         self._page_loaded: bool = False
         self._ready_check_inflight: bool = False
+        self._load_inflight: bool = False
+        self._load_attempts: int = 0
+        self._menu: QMenu | None = None
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -122,8 +143,10 @@ class CalendarWindow(QMainWindow):
         self._poll_timer.setInterval(150)
         self._poll_timer.timeout.connect(self._poll_open)
 
-        for seq in ("Ctrl+Q", "Escape"):
-            QShortcut(QKeySequence(seq), self).activated.connect(QApplication.quit)
+        # Escape is deliberately not bound to quit — the web layer uses it to
+        # cancel the inline title editor and dismiss UI, and a global shortcut
+        # would swallow those.
+        QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(QApplication.quit)
 
         self._build_tray()
 
@@ -136,7 +159,11 @@ class CalendarWindow(QMainWindow):
         self._tray = QSystemTrayIcon(icon, self)
         self._tray.setToolTip("Calendar Sidebar")
 
+        # Keep a Python reference: QSystemTrayIcon.setContextMenu() does not
+        # take ownership, so a local QMenu would be garbage-collected and the
+        # context menu would silently stop working.
         menu = QMenu()
+        self._menu = menu
         act_toggle = QAction("Show / Hide sidebar", menu)
         act_toggle.triggered.connect(self._toggle_visible)
         act_quit = QAction("Quit", menu)
@@ -166,6 +193,12 @@ class CalendarWindow(QMainWindow):
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         self._disable_dwm_corners()
+        self._sync_poll_timer()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        # There is nothing to poll while the sidebar is hidden
+        self._poll_timer.stop()
 
     def _disable_dwm_corners(self) -> None:
         """Tell the Windows DWM compositor not to round this window's corners."""
@@ -208,25 +241,45 @@ class CalendarWindow(QMainWindow):
         ok = reply.error() == QNetworkReply.NetworkError.NoError
         reply.deleteLater()
         self._ready_check_inflight = False
-        if self._page_loaded:
+        if self._page_loaded or self._load_inflight:
             return
         if ok:
             logger.info("API server is up — loading UI")
             self._ready_timer.stop()
-            self._page_loaded = True
+            self._load_inflight = True
             self._view.load(QUrl(f"{self._base_url}/"))
         else:
             logger.debug("API server not ready yet — retrying")
 
     def _on_loaded(self, ok: bool) -> None:
+        self._load_inflight = False
         if ok:
+            self._page_loaded = True
+            self._load_attempts = 0
             logger.info("WebEngine page loaded successfully")
             QTimer.singleShot(80, lambda: self._view.page().runJavaScript(_INJECT_JS))
-            QTimer.singleShot(120, self._poll_timer.start)
+            QTimer.singleShot(120, self._sync_poll_timer)
+            return
+
+        self._load_attempts += 1
+        logger.error(
+            f"WebEngine failed to load {self._base_url}/ "
+            f"(attempt {self._load_attempts}/{_MAX_LOAD_ATTEMPTS}) — server may have died"
+        )
+        if self._load_attempts >= _MAX_LOAD_ATTEMPTS:
+            logger.critical("Giving up on UI load — restart the app to retry")
+            return
+        delay = min(_RETRY_BASE_MS * 2 ** (self._load_attempts - 1), _RETRY_MAX_MS)
+        logger.info(f"Retrying UI load in {delay} ms")
+        self._ready_timer.stop()
+        QTimer.singleShot(delay, self._ready_timer.start)
+
+    def _sync_poll_timer(self) -> None:
+        """Only poll the page while it is loaded and actually on screen."""
+        if self._page_loaded and self.isVisible():
+            self._poll_timer.start()
         else:
-            logger.error(
-                f"WebEngine failed to load {self._base_url}/ — server may have died"
-            )
+            self._poll_timer.stop()
 
     def _poll_open(self) -> None:
         try:
@@ -266,8 +319,15 @@ def main() -> None:
         # Set AppUserModelID so Windows groups this process correctly in the taskbar
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("com.calendar.sidebar.v1")
 
-    logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
+    logger.add(_LOG_FILE, rotation="10 MB", retention="1 week", level="DEBUG", encoding="utf-8")
     logger.info("Calendar sidebar starting up")
+
+    if not _acquire_single_instance():
+        logger.warning("Another Calendar Sidebar instance is already running — exiting")
+        ctypes.windll.user32.MessageBoxW(
+            0, "Calendar Sidebar is already running.", "Calendar Sidebar", 0x40
+        )
+        sys.exit(0)
 
     if not _BUILD_DIR.exists():
         logger.critical(f"Build directory not found: {_BUILD_DIR} — run  bun run build  first")

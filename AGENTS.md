@@ -25,9 +25,23 @@ uv run widget.py     # start the app (uv handles all Python deps)
 
 Or double-click `run.vbs` for a silent, no-console launch. All log output goes to `log/`.
 
+`bun run check` runs `svelte-check` for frontend type errors.
+
 ## Ports
 
 The API server binds 8764 by default and scans upward for a free port if it's taken. The OAuth redirect URI (`GOOGLE_REDIRECT_URI`, default `http://localhost:8764/api/auth/callback`) must match the registered port in Google Cloud Console — if the server falls back to another port, first-time login needs `GOOGLE_REDIRECT_URI` set accordingly. Once `.tokens.json` exists, the port doesn't matter.
+
+## Local API hardening
+
+The API is bound to `127.0.0.1` and is only meant to be reached by the bundled WebEngine view. Do not loosen any of the following:
+
+- `TrustedHostMiddleware` allows only `127.0.0.1` and `localhost`, so a DNS-rebinding page cannot reach the API.
+- `/docs`, `/redoc`, and `/openapi.json` are disabled.
+- The SPA catch-all resolves each request path and rejects anything that escapes `build/` (e.g. `/%2e%2e%2f.env`).
+- OAuth `state` is generated per login, stored server-side for 10 minutes, and validated single-use on the callback.
+- `.tokens.json` is written atomically, guarded by a lock against concurrent refresh, and chmodded `0600`.
+
+A named-mutex guard prevents a second instance from starting.
 
 ## Python deps
 
@@ -46,15 +60,23 @@ Bun only — `bun.lock` is the lockfile. Do not add `package-lock.json` or `pnpm
 
 ## Debugging
 
-Check `log/widget.log` and `log/server.log` first. Key log lines to look for:
+When launched via `uv run widget.py` or `run.vbs`, uvicorn runs inside the widget process, so **all** output — API and OAuth messages included — lands in `log/widget.log`. `log/server.log` only appears when you run `uv run server.py` standalone.
+
+Key log lines to look for:
 
 | Log message | What it means |
 |---|---|
 | `Missing Google OAuth config` | `.env` is missing or incomplete |
+| `Cannot start OAuth flow` | `/api/auth/google` has no usable config — returns 503 |
 | `Token file not found` | Not yet authenticated — visit `/api/auth/google` |
 | `API request rejected — user not authenticated` | 401 on event fetch; same fix |
+| `Stored credentials are invalid and cannot be refreshed` | Token unusable with no valid refresh token — 401 + reconnect prompt |
 | `Credential refresh failed` | Refresh token revoked; re-authenticate |
+| `OAuth callback rejected — missing, unknown, or expired state` | State was not issued by this process (or is older than 10 min); restart the login flow |
 | `API server not ready yet — retrying` | Widget waits for the port to bind before loading the UI |
+| `Retrying UI load in ... ms` / `WebEngine failed to load ... (attempt n/5)` | Page load failed; the widget retries with backoff |
+| `Giving up on UI load` | Five consecutive load failures — restart the app |
+| `Another Calendar Sidebar instance is already running` | Single-instance guard tripped |
 | `Server will run on port ... but GOOGLE_REDIRECT_URI points at ...` | Port fallback broke first-time login; see Ports |
 
 ## Conventions

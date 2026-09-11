@@ -140,13 +140,24 @@
     return dur <= 30 ? ['ec-short'] : [];
   }
 
+  // event-calendar injects this html via innerHTML, so every interpolated
+  // value must be escaped — event titles and ids come from Google and are
+  // not trusted.
+  function escapeHtml(value: unknown): string {
+    return String(value ?? '').replace(
+      /[&<>"']/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string
+    );
+  }
+
   function handleEventContent(info: any) {
     const timeStr = info.event.allDay
       ? 'All day'
       : `${formatTime(toDate(info.event.start))} – ${formatTime(toDate(info.event.end))}`;
-    const removeBtn = `<button class="ec-remove-btn" data-event-id="${info.event.id}" title="Remove">×</button>`;
-    const title = `<span class="ec-title-text">${info.event.title}</span>`;
-    return { html: `<div class="ec-custom-event"><div class="ec-custom-title" data-event-id="${info.event.id}">${title} ${removeBtn}</div><div class="ec-custom-time">${timeStr}</div></div>` };
+    const id = escapeHtml(info.event.id);
+    const removeBtn = `<button class="ec-remove-btn" data-event-id="${id}" title="Remove">×</button>`;
+    const title = `<span class="ec-title-text">${escapeHtml(info.event.title)}</span>`;
+    return { html: `<div class="ec-custom-event"><div class="ec-custom-title" data-event-id="${id}">${title} ${removeBtn}</div><div class="ec-custom-time">${escapeHtml(timeStr)}</div></div>` };
   }
 
   function handleEventClick(info: any) {
@@ -173,9 +184,21 @@
 
   // The all-day slot is disabled in this layout, so all-day events must be
   // fed to the calendar without the allDay flag — they render as timed
-  // events (00:00 → next midnight) instead. `events` keeps the flag for
-  // the "All day" label in handleEventContent.
-  let calEvents = $derived(events.map(({ allDay: _allDay, ...rest }) => rest));
+  // events instead. `events` keeps the flag for the "All day" label in
+  // handleEventContent.
+  //
+  // Google's all-day `end.date` is exclusive (the next midnight), and with
+  // slotEventOverlap off a 24 h block would fill the column and steal half
+  // the width from every timed event — so clamp the display end to the
+  // current day's 23:59.
+  let calEvents = $derived(
+    events.map(({ allDay, ...rest }) => {
+      if (!allDay) return rest;
+      const dayEnd = new Date(now);
+      dayEnd.setHours(23, 59, 0, 0);
+      return { ...rest, end: dayEnd.toISOString() };
+    })
+  );
 
   // svelte-ignore state_referenced_locally
   let options = $state({

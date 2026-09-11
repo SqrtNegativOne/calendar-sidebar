@@ -10,7 +10,9 @@ Dependencies are declared in pyproject.toml (installed via uv).
 
 import json
 import os
+import secrets
 import socket
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,13 +20,14 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build as gclient_build
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 load_dotenv()
 
@@ -33,7 +36,23 @@ _BUILD_DIR = Path(__file__).parent / "build"
 _TOKEN_FILE = Path(__file__).parent / ".tokens.json"
 _SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-app = FastAPI()
+# The API is a local-only, unauthenticated-by-design service for the widget.
+# Pinning the Host header stops a DNS-rebinding page from reaching it.
+_ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+
+# Short-lived, single-use OAuth state store (login-CSRF guard).
+_OAUTH_STATE_TTL = timedelta(minutes=10)
+_oauth_states: dict[str, datetime] = {}
+_oauth_lock = threading.Lock()
+
+# FastAPI runs these sync routes in a threadpool, so a background poll racing
+# a user action could otherwise lose an already-rotated refresh token.
+_token_lock = threading.RLock()
+
+# Docs are disabled: this API carries the user's real Google credentials and
+# has no business being browsable from the local machine.
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_ALLOWED_HOSTS)
 
 
 def _client_id() -> str:
@@ -70,41 +89,60 @@ def _client_config() -> dict[str, Any]:
     }
 
 
-def _load_tokens() -> dict[str, Any] | None:
-    if not _TOKEN_FILE.exists():
-        logger.debug(f"Token file not found at {_TOKEN_FILE} — not yet authenticated")
-        return None
+def _chmod_private(path: Path) -> None:
+    """Best-effort owner-only permissions on a file holding OAuth tokens."""
     try:
-        data = json.loads(_TOKEN_FILE.read_text())
-        if data:
-            logger.debug("Token file loaded")
-        else:
-            logger.debug("Token file is empty")
-        return data if data else None
-    except Exception as exc:
-        logger.warning(f"Failed to read token file: {exc}")
-        return None
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        logger.debug(f"Could not restrict permissions on {path.name}: {exc}")
+
+
+def _load_tokens() -> dict[str, Any] | None:
+    with _token_lock:
+        if not _TOKEN_FILE.exists():
+            logger.debug(f"Token file not found at {_TOKEN_FILE} — not yet authenticated")
+            return None
+        try:
+            data = json.loads(_TOKEN_FILE.read_text())
+            if data:
+                logger.debug("Token file loaded")
+            else:
+                logger.debug("Token file is empty")
+            return data if data else None
+        except Exception as exc:
+            logger.warning(f"Failed to read token file: {exc}")
+            return None
 
 
 def _save_tokens(token: str | None, refresh_token: str | None, expiry: str | None) -> None:
-    existing = _load_tokens() or {}
-    updated: dict[str, Any] = {**existing}
-    if token is not None:
-        updated["token"] = token
-    if refresh_token is not None:
-        updated["refresh_token"] = refresh_token
-    if expiry is not None:
-        updated["expiry"] = expiry
-    # Atomic write so a crash mid-save can't corrupt the token file
-    tmp = _TOKEN_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(updated, indent=2))
-    tmp.replace(_TOKEN_FILE)
+    with _token_lock:
+        existing = _load_tokens() or {}
+        updated: dict[str, Any] = {**existing}
+        if token is not None:
+            updated["token"] = token
+        if refresh_token is not None:
+            updated["refresh_token"] = refresh_token
+        if expiry is not None:
+            updated["expiry"] = expiry
+        # Atomic write so a crash mid-save can't corrupt the token file
+        tmp = _TOKEN_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(updated, indent=2))
+        _chmod_private(tmp)
+        tmp.replace(_TOKEN_FILE)
+        _chmod_private(_TOKEN_FILE)
 
 
 def _get_credentials() -> Credentials | None:
     tokens = _load_tokens()
     if not tokens or (not tokens.get("token") and not tokens.get("refresh_token")):
         logger.debug("No usable tokens — credentials unavailable")
+        return None
+
+    try:
+        client_id = _client_id()
+        client_secret = _client_secret()
+    except RuntimeError as exc:
+        logger.error(f"Cannot build credentials — {exc}")
         return None
 
     expiry: datetime | None = None
@@ -118,8 +156,8 @@ def _get_credentials() -> Credentials | None:
         token=tokens.get("token"),
         refresh_token=tokens.get("refresh_token"),
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=_client_id(),
-        client_secret=_client_secret(),
+        client_id=client_id,
+        client_secret=client_secret,
         scopes=_SCOPES,
         expiry=expiry,
     )
@@ -138,6 +176,13 @@ def _get_credentials() -> Credentials | None:
             logger.error(f"Credential refresh failed: {exc}")
             return None
 
+    if not creds.valid:
+        # No refresh token, or the stored token is unusable. Returning None
+        # makes callers answer 401 so the UI shows the reconnect prompt,
+        # instead of handing invalid creds to Google and 500ing.
+        logger.warning("Stored credentials are invalid and cannot be refreshed — re-authenticate")
+        return None
+
     return creds
 
 
@@ -149,33 +194,88 @@ def _require_creds() -> Credentials:
     return creds
 
 
+def _iso_from_block(block: dict[str, Any]) -> str | None:
+    """RFC3339-ish string from a Google `start`/`end` block, or None if empty."""
+    date_time = block.get("dateTime")
+    if date_time:
+        return date_time
+    date = block.get("date")
+    return f"{date}T00:00:00" if date else None
+
+
 def _map_event(ev: dict[str, Any]) -> dict[str, Any]:
-    start = ev.get("start", {})
-    end = ev.get("end", {})
-    all_day = "date" in start
+    start = ev.get("start") or {}
+    end = ev.get("end") or {}
+    start_iso = _iso_from_block(start)
+    end_iso = _iso_from_block(end)
+    if start_iso is None or end_iso is None:
+        raise ValueError(f"event {ev.get('id')!r} has no usable start/end")
     return {
         "id": ev["id"],
-        "title": ev.get("summary", "(no title)"),
-        "start": start.get("dateTime") or f"{start.get('date')}T00:00:00",
-        "end": end.get("dateTime") or f"{end.get('date')}T00:00:00",
-        "allDay": all_day,
+        "title": ev.get("summary") or "(no title)",
+        "start": start_iso,
+        "end": end_iso,
+        "allDay": "date" in start,
     }
+
+
+def _new_oauth_state() -> str:
+    """Issue a single-use OAuth `state` and record it server-side."""
+    state = secrets.token_urlsafe(32)
+    now = datetime.now()
+    with _oauth_lock:
+        for stale, issued in list(_oauth_states.items()):
+            if now - issued > _OAUTH_STATE_TTL:
+                _oauth_states.pop(stale, None)
+        _oauth_states[state] = now
+    return state
+
+
+def _consume_oauth_state(state: str | None) -> bool:
+    """Validate and invalidate a state issued by /api/auth/google."""
+    if not state:
+        return False
+    with _oauth_lock:
+        issued = _oauth_states.pop(state, None)
+    if issued is None:
+        return False
+    return datetime.now() - issued <= _OAUTH_STATE_TTL
 
 
 # Auth routes
 
 @app.get("/api/auth/google")
 def auth_google() -> RedirectResponse:
+    try:
+        config = _client_config()
+    except RuntimeError as exc:
+        logger.error(f"Cannot start OAuth flow — {exc}")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    state = _new_oauth_state()
     logger.info("OAuth flow initiated — redirecting to Google")
-    flow = Flow.from_client_config(_client_config(), scopes=_SCOPES, redirect_uri=_redirect_uri())
-    url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+    flow = Flow.from_client_config(config, scopes=_SCOPES, redirect_uri=_redirect_uri())
+    url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state)
     return RedirectResponse(url)
 
 
 @app.get("/api/auth/callback")
-def auth_callback(code: str) -> RedirectResponse:
+def auth_callback(code: str, state: str | None = None) -> RedirectResponse:
+    if not _consume_oauth_state(state):
+        logger.warning("OAuth callback rejected — missing, unknown, or expired state")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OAuth state — restart the login flow",
+        )
+
+    try:
+        config = _client_config()
+    except RuntimeError as exc:
+        logger.error(f"OAuth callback failed — {exc}")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     logger.info("OAuth callback received — exchanging code for tokens")
-    flow = Flow.from_client_config(_client_config(), scopes=_SCOPES, redirect_uri=_redirect_uri())
+    flow = Flow.from_client_config(config, scopes=_SCOPES, redirect_uri=_redirect_uri())
     flow.fetch_token(code=code)
     creds = flow.credentials
     _save_tokens(
@@ -221,11 +321,14 @@ def list_events() -> list[dict[str, Any]]:
         .execute()
     )
 
-    events = [
-        _map_event(ev)
-        for ev in result.get("items", [])
-        if ev.get("id") and ev.get("start")
-    ]
+    events: list[dict[str, Any]] = []
+    for ev in result.get("items", []):
+        if not ev.get("id") or not ev.get("start"):
+            continue
+        try:
+            events.append(_map_event(ev))
+        except ValueError as exc:
+            logger.warning(f"Skipping malformed event: {exc}")
     logger.info(f"Fetched {len(events)} event(s) for {day_start.date()}")
     return events
 
@@ -234,8 +337,34 @@ class EventBody(BaseModel):
     """Payload for creating a new event."""
 
     title: str
-    start: str
-    end: str
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def _check(self) -> "EventBody":
+        if not self.title.strip():
+            raise ValueError("title must not be empty")
+        if self.end <= self.start:
+            raise ValueError("end must be after start")
+        return self
+
+
+class EventPatch(BaseModel):
+    """Payload for updating an existing event. At least one field is required."""
+
+    title: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> "EventPatch":
+        if self.title is None and self.start is None and self.end is None:
+            raise ValueError("patch must include at least one of title, start, end")
+        if self.title is not None and not self.title.strip():
+            raise ValueError("title must not be empty")
+        if self.start is not None and self.end is not None and self.end <= self.start:
+            raise ValueError("end must be after start")
+        return self
 
 
 @app.post("/api/events", status_code=201)
@@ -249,22 +378,14 @@ def create_event(body: EventBody) -> dict[str, Any]:
             calendarId=_calendar_id(),
             body={
                 "summary": body.title,
-                "start": {"dateTime": body.start},
-                "end": {"dateTime": body.end},
+                "start": {"dateTime": body.start.isoformat()},
+                "end": {"dateTime": body.end.isoformat()},
             },
         )
         .execute()
     )
     logger.info(f"Event created: id={result.get('id')}")
     return _map_event(result)
-
-
-class EventPatch(BaseModel):
-    """Payload for updating an existing event."""
-
-    title: str | None = None
-    start: str | None = None
-    end: str | None = None
 
 
 @app.patch("/api/events/{event_id}")
@@ -277,9 +398,9 @@ def update_event(event_id: str, body: EventPatch) -> dict[str, Any]:
     if body.title is not None:
         patch["summary"] = body.title
     if body.start is not None:
-        patch["start"] = {"dateTime": body.start}
+        patch["start"] = {"dateTime": body.start.isoformat()}
     if body.end is not None:
-        patch["end"] = {"dateTime": body.end}
+        patch["end"] = {"dateTime": body.end.isoformat()}
 
     result = (
         svc.events()
@@ -303,10 +424,17 @@ def delete_event(event_id: str) -> None:
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa(full_path: str) -> FileResponse:
-    candidate = _BUILD_DIR / full_path if full_path else _BUILD_DIR / "index.html"
-    if full_path and candidate.is_file():
+    build_root = _BUILD_DIR.resolve()
+    index = build_root / "index.html"
+    if not full_path:
+        return FileResponse(str(index))
+    # Path traversal guard: `full_path` is attacker-controlled, so anything
+    # that escapes build/ (e.g. /%2e%2e%2f.env) falls back to the SPA shell
+    # rather than serving arbitrary files off disk.
+    candidate = (build_root / full_path).resolve()
+    if candidate.is_relative_to(build_root) and candidate.is_file():
         return FileResponse(str(candidate))
-    return FileResponse(str(_BUILD_DIR / "index.html"))
+    return FileResponse(str(index))
 
 
 def find_free_port(preferred: int = 8764) -> int:
@@ -350,5 +478,5 @@ def run(server) -> None:
 
 
 if __name__ == "__main__":
-    logger.add(_LOG_FILE, rotation="1 MB", retention=3, level="DEBUG", encoding="utf-8")
+    logger.add(_LOG_FILE, rotation="10 MB", retention="1 week", level="DEBUG", encoding="utf-8")
     run(create_server(find_free_port()))
