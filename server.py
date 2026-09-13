@@ -301,7 +301,6 @@ def auth_status() -> dict[str, bool]:
 def list_events() -> list[dict[str, Any]]:
     logger.info("Fetching today's calendar events")
     creds = _require_creds()
-    svc = gclient_build("calendar", "v3", credentials=creds)
 
     # Day boundaries in the machine's local timezone, not UTC — otherwise
     # the window drifts by hours for anyone west/east of Greenwich
@@ -309,17 +308,27 @@ def list_events() -> list[dict[str, Any]]:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start + timedelta(days=1)
 
-    result = (
-        svc.events()
-        .list(
-            calendarId=_calendar_id(),
-            timeMin=day_start.isoformat(),
-            timeMax=day_end.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
+    # Surface Google/transport failures as an explicit 502 with a logged
+    # traceback instead of a bare 500, so the UI can show the real reason.
+    try:
+        svc = gclient_build("calendar", "v3", credentials=creds)
+        result = (
+            svc.events()
+            .list(
+                calendarId=_calendar_id(),
+                timeMin=day_start.isoformat(),
+                timeMax=day_end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
         )
-        .execute()
-    )
+    except Exception as exc:
+        logger.exception(f"Google Calendar fetch failed for {day_start.date()}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Calendar request failed: {exc}",
+        ) from exc
 
     events: list[dict[str, Any]] = []
     for ev in result.get("items", []):

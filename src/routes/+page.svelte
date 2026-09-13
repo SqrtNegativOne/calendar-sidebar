@@ -11,6 +11,9 @@
   let loading = $state(true);
   let error = $state(false);
   let syncError = $state(false);
+  let fetching = $state(false);
+  let lastError = $state<string | null>(null);
+  let lastSync = $state<Date | null>(null);
   let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
@@ -19,19 +22,38 @@
   }
 
   async function fetchEvents() {
+    fetching = true;
     try {
       const resp = await fetch('/api/events');
       if (!resp.ok) {
         if (resp.status === 401) {
           authenticated = false;
+          lastError = null;
           return;
         }
-        throw new Error(`${resp.status}`);
+        // Prefer the backend's error detail over a bare status code so the
+        // failure is legible in the UI instead of silent.
+        let detail = `${resp.status} ${resp.statusText}`.trim();
+        try {
+          const body = await resp.json();
+          if (body?.detail) detail = `${resp.status}: ${body.detail}`;
+        } catch {
+          /* non-JSON error body — keep the status */
+        }
+        throw new Error(detail);
       }
-      events = (await resp.json()) as ECEvent[];
+      const data = await resp.json();
+      if (!Array.isArray(data)) throw new Error('Malformed response: expected an event list');
+      events = data as ECEvent[];
       syncError = false;
-    } catch {
+      lastError = null;
+      lastSync = new Date();
+    } catch (err) {
       syncError = true;
+      lastError = err instanceof Error ? err.message : String(err);
+      addLog(`Sync failed: ${lastError}`);
+    } finally {
+      fetching = false;
     }
   }
 
@@ -272,7 +294,11 @@
   {loading}
   {error}
   {syncError}
+  {fetching}
+  {lastError}
+  {lastSync}
   onToggle={handleToggle}
+  onRefresh={fetchEvents}
   onEventClick={handleEventClick}
   onEventDrop={handleEventDrop}
   onEventResize={handleEventResize}

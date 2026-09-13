@@ -37,7 +37,11 @@
     loading?: boolean;
     error?: boolean;
     syncError?: boolean;
+    fetching?: boolean;
+    lastError?: string | null;
+    lastSync?: Date | null;
     onToggle: () => void;
+    onRefresh: () => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
     onEventResize: (info: any) => void;
@@ -54,7 +58,11 @@
     loading = false,
     error = false,
     syncError = false,
+    fetching = false,
+    lastError = null,
+    lastSync = null,
     onToggle,
+    onRefresh,
     onEventClick,
     onEventDrop,
     onEventResize,
@@ -81,8 +89,17 @@
     };
     document.addEventListener('visibilitychange', onVisChange);
 
+    // The backend always fetches "today", so the view must roll over with the
+    // wall clock too — otherwise after midnight the calendar keeps rendering
+    // yesterday while the API returns today's events, and nothing lines up.
+    const dayTick = setInterval(() => {
+      const d = new Date();
+      if (d.toDateString() !== now.toDateString()) now = d;
+    }, 30_000);
+
     return () => {
       document.removeEventListener('visibilitychange', onVisChange);
+      clearInterval(dayTick);
     };
   });
 
@@ -151,7 +168,11 @@
   }
 
   function handleEventContent(info: any) {
-    const timeStr = info.event.allDay
+    // `calEvents` strips the allDay flag so event-calendar renders all-day
+    // items as timed blocks (the all-day slot is disabled), so recover the
+    // label from the source events instead.
+    const isAllDay = allDayIds.has(String(info.event.id));
+    const timeStr = isAllDay
       ? 'All day'
       : `${formatTime(toDate(info.event.start))} – ${formatTime(toDate(info.event.end))}`;
     const id = escapeHtml(info.event.id);
@@ -182,6 +203,10 @@
   const calPlugins = [TimeGrid, Interaction];
   const scrollH = Math.max(6, new Date().getHours() - 2);
 
+  // Identifiers of all-day source events — used to keep the "All day" label
+  // after the flag is stripped for rendering.
+  let allDayIds = $derived(new Set(events.filter((e) => e.allDay).map((e) => e.id)));
+
   // The all-day slot is disabled in this layout, so all-day events must be
   // fed to the calendar without the allDay flag — they render as timed
   // events instead. `events` keeps the flag for the "All day" label in
@@ -189,14 +214,25 @@
   //
   // Google's all-day `end.date` is exclusive (the next midnight), and with
   // slotEventOverlap off a 24 h block would fill the column and steal half
-  // the width from every timed event — so clamp the display end to the
-  // current day's 23:59.
+  // the width from every timed event — so clamp the display end to the end
+  // of the event's own day (falling back to today). Basing it on the event
+  // start rather than `now` avoids an end-before-start block that vanishes
+  // when the two race across a day boundary.
+  //
+  // Both bounds become local Date objects: the backend sends all-day dates
+  // as naive `YYYY-MM-DDT00:00:00`, which event-calendar would otherwise
+  // reparse as UTC and shift a day for timezones west of UTC.
   let calEvents = $derived(
     events.map(({ allDay, ...rest }) => {
       if (!allDay) return rest;
-      const dayEnd = new Date(now);
+      const startDay = new Date(rest.start);
+      startDay.setHours(0, 0, 0, 0);
+      const today = new Date(now);
+      today.setHours(0, 0, 0, 0);
+      const displayDay = startDay > today ? startDay : today;
+      const dayEnd = new Date(displayDay);
       dayEnd.setHours(23, 59, 0, 0);
-      return { ...rest, end: dayEnd.toISOString() };
+      return { ...rest, start: startDay, end: dayEnd };
     })
   );
 
@@ -295,6 +331,14 @@
   <div class="panel" bind:this={panelEl} ondblclick={handlePanelDblClick}>
     <div class="panel-header">
       <div class="header-line">{headerStr}</div>
+      {#if fetching}
+        <span
+          class="spinner"
+          role="status"
+          aria-label="Syncing events"
+          title={lastSync ? `Syncing… last synced ${lastSync.toLocaleTimeString()}` : 'Syncing events…'}
+        ></span>
+      {/if}
     </div>
     {#if loading}
       <div class="panel-status">Connecting...</div>
@@ -307,10 +351,16 @@
       </div>
     {:else}
       {#if syncError}
-        <div class="sync-error">Sync failed &mdash; retrying&hellip;</div>
+        <div class="sync-error" role="alert">
+          <span class="sync-error-msg">{lastError ?? 'Sync failed'}</span>
+          <button class="retry-btn" onclick={onRefresh}>Retry</button>
+        </div>
       {/if}
       <div class="calendar-wrap" class:half={showNotes}>
         <Calendar plugins={calPlugins} {options} />
+        {#if events.length === 0 && !fetching}
+          <div class="empty-state">No events today</div>
+        {/if}
       </div>
       {#if showNotes}
         <div class="notes-wrap">
@@ -400,6 +450,10 @@
     padding: 8px 12px;
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
   .panel-header .header-line {
     font-size: 0.72rem;
@@ -408,6 +462,22 @@
     overflow: hidden;
     text-overflow: ellipsis;
     letter-spacing: 0.03em;
+  }
+
+  .spinner {
+    flex-shrink: 0;
+    width: 11px;
+    height: 11px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 700ms linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation-duration: 2s; }
   }
 
   .panel-status {
@@ -441,12 +511,33 @@
   }
 
   .sync-error {
-    padding: 4px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
     font-size: 0.7rem;
     color: #e8a09a;
     background: rgba(204, 95, 84, 0.15);
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
+  }
+  .sync-error-msg {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .retry-btn {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    font-size: 0.68rem;
+    color: var(--ink);
+    background: rgba(204, 95, 84, 0.35);
+    border: 1px solid rgba(232, 160, 154, 0.5);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .retry-btn:hover {
+    background: rgba(204, 95, 84, 0.55);
   }
 
   .title-editor {
@@ -468,7 +559,18 @@
     flex: 1;
     overflow: hidden;
     min-height: 0;
+    position: relative;
     transition: height 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    pointer-events: none;
   }
   .calendar-wrap.half {
     flex: none;
