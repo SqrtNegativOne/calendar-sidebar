@@ -49,6 +49,7 @@ dependencies = [
     { name = "pyqt6" },
     { name = "pyqt6-webengine" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "uvicorn" },
 ]
 
@@ -62,6 +63,7 @@ requires-dist = [
     { name = "pyqt6", specifier = ">=6.7" },
     { name = "pyqt6-webengine", specifier = ">=6.7" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "requests", specifier = ">=2.32" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
 

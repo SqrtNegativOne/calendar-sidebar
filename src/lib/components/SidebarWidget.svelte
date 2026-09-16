@@ -27,21 +27,35 @@
     start: string;
     end: string;
     allDay?: boolean;
+    /* Which provider/calendar the event belongs to (merged reads). */
+    provider?: string;
+    calendarId?: string;
     color?: string;
+    textColor?: string;
+  }
+
+  export interface ProviderStatus {
+    id: string;
+    displayName: string;
+    configured: boolean;
+    authenticated: boolean;
   }
 
   type Props = {
     events: ECEvent[];
     open: boolean;
     authenticated?: boolean;
+    providers?: ProviderStatus[];
     loading?: boolean;
     error?: boolean;
     syncError?: boolean;
     fetching?: boolean;
     lastError?: string | null;
     lastSync?: Date | null;
+    connectHint?: string | null;
     onToggle: () => void;
     onRefresh: () => void;
+    onConnect: (provider: string) => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
     onEventResize: (info: any) => void;
@@ -55,14 +69,17 @@
     events,
     open,
     authenticated = true,
+    providers = [],
     loading = false,
     error = false,
     syncError = false,
     fetching = false,
     lastError = null,
     lastSync = null,
+    connectHint = null,
     onToggle,
     onRefresh,
+    onConnect,
     onEventClick,
     onEventDrop,
     onEventResize,
@@ -168,13 +185,7 @@
   }
 
   function handleEventContent(info: any) {
-    // `calEvents` strips the allDay flag so event-calendar renders all-day
-    // items as timed blocks (the all-day slot is disabled), so recover the
-    // label from the source events instead.
-    const isAllDay = allDayIds.has(String(info.event.id));
-    const timeStr = isAllDay
-      ? 'All day'
-      : `${formatTime(toDate(info.event.start))} – ${formatTime(toDate(info.event.end))}`;
+    const timeStr = `${formatTime(toDate(info.event.start))} – ${formatTime(toDate(info.event.end))}`;
     const id = escapeHtml(info.event.id);
     const removeBtn = `<button class="ec-remove-btn" data-event-id="${id}" title="Remove">×</button>`;
     const title = `<span class="ec-title-text">${escapeHtml(info.event.title)}</span>`;
@@ -203,38 +214,12 @@
   const calPlugins = [TimeGrid, Interaction];
   const scrollH = Math.max(6, new Date().getHours() - 2);
 
-  // Identifiers of all-day source events — used to keep the "All day" label
-  // after the flag is stripped for rendering.
-  let allDayIds = $derived(new Set(events.filter((e) => e.allDay).map((e) => e.id)));
-
-  // The all-day slot is disabled in this layout, so all-day events must be
-  // fed to the calendar without the allDay flag — they render as timed
-  // events instead. `events` keeps the flag for the "All day" label in
-  // handleEventContent.
-  //
-  // Google's all-day `end.date` is exclusive (the next midnight), and with
-  // slotEventOverlap off a 24 h block would fill the column and steal half
-  // the width from every timed event — so clamp the display end to the end
-  // of the event's own day (falling back to today). Basing it on the event
-  // start rather than `now` avoids an end-before-start block that vanishes
-  // when the two race across a day boundary.
-  //
-  // Both bounds become local Date objects: the backend sends all-day dates
-  // as naive `YYYY-MM-DDT00:00:00`, which event-calendar would otherwise
-  // reparse as UTC and shift a day for timezones west of UTC.
-  let calEvents = $derived(
-    events.map(({ allDay, ...rest }) => {
-      if (!allDay) return rest;
-      const startDay = new Date(rest.start);
-      startDay.setHours(0, 0, 0, 0);
-      const today = new Date(now);
-      today.setHours(0, 0, 0, 0);
-      const displayDay = startDay > today ? startDay : today;
-      const dayEnd = new Date(displayDay);
-      dayEnd.setHours(23, 59, 0, 0);
-      return { ...rest, start: startDay, end: dayEnd };
-    })
-  );
+  // All-day events (`start.date` on Google) are returned by the API so the
+  // widget still knows the day is not empty, but they are intentionally not
+  // rendered in the grid — the previous behaviour mapped them to full-height
+  // timed blocks that consumed the whole column. `events` keeps them for the
+  // empty-state count and lookups; only timed events reach event-calendar.
+  let calEvents = $derived(events.filter((e) => !e.allDay));
 
   // svelte-ignore state_referenced_locally
   let options = $state({
@@ -346,8 +331,18 @@
       <div class="panel-status">Backend unreachable</div>
     {:else if !authenticated}
       <div class="panel-status">
-        <p>Google Calendar not connected.</p>
-        <a class="connect-link" href="/api/auth/google">Connect</a>
+        <p>No calendar connected.</p>
+        {#each providers.filter((p) => p.configured) as provider (provider.id)}
+          <button class="connect-link" onclick={() => onConnect(provider.id)}>
+            Connect {provider.displayName}
+          </button>
+        {/each}
+        {#if providers.every((p) => !p.configured)}
+          <p>No providers configured — see .env.example.</p>
+        {/if}
+        {#if connectHint}
+          <p class="connect-hint">{connectHint}</p>
+        {/if}
       </div>
     {:else}
       {#if syncError}
@@ -500,14 +495,23 @@
     padding: 0.4rem 1rem;
     background: var(--accent);
     color: var(--ink);
+    border: none;
     border-radius: 5px;
     text-decoration: none;
+    font-family: inherit;
     font-size: 0.8rem;
     font-weight: 500;
+    cursor: pointer;
     transition: opacity 150ms;
   }
   .connect-link:hover {
     opacity: 0.8;
+  }
+  .connect-hint {
+    font-size: 0.7rem;
+    opacity: 0.75;
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   .sync-error {
@@ -655,9 +659,9 @@
   }
 
   .calendar-wrap :global(.ec-event) {
-    background: #1e3a5f !important;
-    border-left: 3px solid #5090d0 !important;
-    color: #a8cef0 !important;
+    /* Background and text colour are per-event (the Google calendar's own
+       colours, applied inline by event-calendar); only shared chrome here. */
+    border-left: 3px solid rgba(255, 255, 255, 0.35) !important;
     border-radius: 3px;
   }
 

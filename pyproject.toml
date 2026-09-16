@@ -1,7 +1,7 @@
 [project]
 name = "calendar-sidebar"
 version = "0.1.0"
-description = "Always-on-top Windows desktop sidebar showing today's Google Calendar events"
+description = "Always-on-top Windows desktop sidebar showing today's Google and Microsoft Calendar events"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -12,6 +12,7 @@ dependencies = [
   "google-auth>=2.38",
   "google-auth-oauthlib>=1.2",
   "google-api-python-client>=2.166",
+  "requests>=2.32",
   "python-dotenv>=1.0",
   "loguru>=0.7",
 ]

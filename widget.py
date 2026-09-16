@@ -19,6 +19,7 @@ from pathlib import Path
 from loguru import logger
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtCore import Qt, QUrl, QTimer
 from PyQt6.QtGui import (
     QAction,
@@ -125,6 +126,7 @@ class CalendarWindow(QMainWindow):
         self._view = QWebEngineView(self)
         self._view.setGeometry(0, 0, _OPEN_W, screen.height())
         self._view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+        self._view.page().featurePermissionRequested.connect(self._on_feature_permission)
         self._view.loadFinished.connect(self._on_loaded)
 
         # Poll until uvicorn has bound its port, then load the SPA — no fixed
@@ -149,6 +151,27 @@ class CalendarWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Q"), self).activated.connect(QApplication.quit)
 
         self._build_tray()
+
+    def _on_feature_permission(
+        self, origin: QUrl, feature: QWebEnginePage.Feature
+    ) -> None:
+        """Grant clipboard access to the local UI only; deny everything else.
+
+        The Connect button copies a provider sign-in URL to the clipboard, and
+        WebEngine gates clipboard writes behind a feature permission.
+        """
+        page = self._view.page()
+        allowed = (
+            origin.host() in {"127.0.0.1", "localhost"}
+            and feature == QWebEnginePage.Feature.ClipboardReadWrite
+        )
+        page.setFeaturePermission(
+            origin,
+            feature,
+            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
+            if allowed
+            else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser,
+        )
 
     def _build_tray(self) -> None:
         """System tray icon with show/hide + quit actions."""
