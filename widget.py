@@ -155,22 +155,17 @@ class CalendarWindow(QMainWindow):
     def _on_feature_permission(
         self, origin: QUrl, feature: QWebEnginePage.Feature
     ) -> None:
-        """Grant clipboard access to the local UI only; deny everything else.
+        """Deny every WebEngine feature request.
 
-        The Connect button copies a provider sign-in URL to the clipboard, and
-        WebEngine gates clipboard writes behind a feature permission.
+        The UI only reads today's events from the local API and writes changes
+        back, so it needs no camera, geolocation, clipboard or notification
+        access — denying by default keeps that from ever being granted silently.
         """
-        page = self._view.page()
-        allowed = (
-            origin.host() in {"127.0.0.1", "localhost"}
-            and feature == QWebEnginePage.Feature.ClipboardReadWrite
-        )
-        page.setFeaturePermission(
+        logger.debug(f"Denying WebEngine feature {feature} for {origin.toString()}")
+        self._view.page().setFeaturePermission(
             origin,
             feature,
-            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser
-            if allowed
-            else QWebEnginePage.PermissionPolicy.PermissionDeniedByUser,
+            QWebEnginePage.PermissionPolicy.PermissionDeniedByUser,
         )
 
     def _build_tray(self) -> None:
@@ -256,7 +251,7 @@ class CalendarWindow(QMainWindow):
         if self._page_loaded or self._ready_check_inflight:
             return
         self._ready_check_inflight = True
-        url = QUrl(f"{self._base_url}/api/auth/status")
+        url = QUrl(f"{self._base_url}/api/status")
         reply = self._net.get(QNetworkRequest(url))
         reply.finished.connect(lambda: self._on_ready_check(reply))
 

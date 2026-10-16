@@ -10,7 +10,7 @@
   const MAX_STARTUP_RETRIES = 10;
 
   let open = $state(true);
-  let authenticated = $state(false);
+  let configured = $state(false);
   let providers = $state<ProviderStatus[]>([]);
   let loading = $state(true);
   let error = $state(false);
@@ -18,7 +18,6 @@
   let fetching = $state(false);
   let lastError = $state<string | null>(null);
   let lastSync = $state<Date | null>(null);
-  let connectHint = $state<string | null>(null);
   let events: ECEvent[] = $state([]);
   let log: string[] = $state([]);
 
@@ -26,20 +25,20 @@
     log = [msg, ...log].slice(0, 20);
   }
 
-  function activeProvider(): string | undefined {
-    return providers.find((p) => p.authenticated)?.id;
-  }
-
-  // Events are merged from every connected provider, so edits/deletes must be
-  // routed back to the provider and calendar the event actually came from.
+  // Events are merged from every calendar of every provider, so edits and
+  // deletes must be routed back to the provider and calendar the event came
+  // from — and, for a recurring event, to the occurrence the user touched.
   function eventQuery(id: string): string {
     const ev = events.find((e) => e.id === id);
     const params = new URLSearchParams();
     if (ev?.provider) params.set('provider', ev.provider);
     if (ev?.calendarId) params.set('calendar_id', ev.calendarId);
-    const qs = params.toString();
-    return qs ? `?${qs}` : '';
+    const occurrence = ev?.recurrenceId ?? ev?.start;
+    if (occurrence) params.set('original_start', occurrence);
+    return `?${params.toString()}`;
   }
+
+  // The API only exposes today, so anything the user sees is in the local day.
 
   async function fetchEvents() {
     fetching = true;
@@ -47,7 +46,7 @@
       const resp = await fetch('/api/events');
       if (!resp.ok) {
         if (resp.status === 401) {
-          authenticated = false;
+          configured = false;
           lastError = null;
           return;
         }
@@ -78,42 +77,22 @@
   }
 
   let interval: ReturnType<typeof setInterval> | undefined;
-  let statusInterval: ReturnType<typeof setInterval> | undefined;
 
   async function checkStatus(): Promise<boolean> {
     try {
-      const resp = await fetch('/api/auth/status');
+      const resp = await fetch('/api/status');
       if (!resp.ok) throw new Error(`${resp.status}`);
       const status = (await resp.json()) as {
-        authenticated: boolean;
+        configured: boolean;
         providers?: ProviderStatus[];
       };
       providers = status.providers ?? [];
-      authenticated = status.authenticated;
+      configured = status.configured;
       error = false;
       return true;
     } catch {
       return false;
     }
-  }
-
-  // Keep probing while the backend is down *or* the user hasn't connected yet,
-  // so the panel recovers on its own — including after a system-browser login.
-  function watchStatus() {
-    if (statusInterval) return;
-    statusInterval = setInterval(async () => {
-      if (!(await checkStatus())) return;
-      if (!authenticated) return;
-      stopStatusWatch();
-      connectHint = null;
-      await fetchEvents();
-      startPolling();
-    }, RETRY_MS);
-  }
-
-  function stopStatusWatch() {
-    clearInterval(statusInterval);
-    statusInterval = undefined;
   }
 
   function startPolling() {
@@ -133,12 +112,12 @@
   }
 
   function handleVisibilityChange() {
-    if (!document.hidden && open && authenticated) fetchEvents();
+    if (!document.hidden && open && configured) fetchEvents();
   }
 
-  // Token expired mid-session — drop back to the reconnect prompt
+  // Nothing left to poll once the backend reports no configured calendar
   $effect(() => {
-    if (!authenticated) stopPolling();
+    if (!configured) stopPolling();
   });
 
   onMount(() => {
@@ -154,13 +133,9 @@
 
       if (!reachable) {
         error = true;
-        watchStatus();
         return;
       }
-      if (!authenticated) {
-        watchStatus();
-        return;
-      }
+      if (!configured) return;
 
       await fetchEvents();
       startPolling();
@@ -169,61 +144,17 @@
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopPolling();
-      stopStatusWatch();
     };
   });
 
   function handleToggle() {
     open = !open;
     // Catch up on anything missed while the sidebar was closed
-    if (open && authenticated) fetchEvents();
+    if (open && configured) fetchEvents();
   }
   function handleEventClick(_info: any) {}
 
-  // Google/Microsoft reject OAuth inside the widget's embedded WebEngine (and
-  // WebAuthn passkey prompts don't work there), so the backend hands us a
-  // consent URL, we copy it to the clipboard for the user to open in any
-  // browser, then poll until the callback stores the token.
-  async function copyToClipboard(text: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Async clipboard API unavailable/blocked inside WebEngine — fall back
-      // to the legacy execCommand path below.
-    }
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try {
-      document.execCommand('copy');
-    } finally {
-      document.body.removeChild(ta);
-    }
-  }
-
-  async function handleConnect(provider: string) {
-    try {
-      const resp = await fetch(`/api/auth/${encodeURIComponent(provider)}/url`);
-      if (!resp.ok) throw new Error(`${resp.status}`);
-      const data = (await resp.json()) as { url?: string };
-      if (!data.url) throw new Error('No sign-in URL returned');
-      await copyToClipboard(data.url);
-      connectHint = 'Sign-in link copied — open it in any browser, then come back. This panel updates on its own.';
-      addLog(`Sign-in link copied to clipboard (${provider})`);
-      watchStatus();
-    } catch (err) {
-      connectHint = null;
-      addLog(`Connect failed: ${err}`);
-    }
-  }
-
   async function createEvent(title: string, start: Date, end: Date) {
-    const provider = activeProvider();
     try {
       const resp = await fetch('/api/events', {
         method: 'POST',
@@ -231,8 +162,7 @@
         body: JSON.stringify({
           title,
           start: start.toISOString(),
-          end: end.toISOString(),
-          provider
+          end: end.toISOString()
         }),
       });
       if (!resp.ok) throw new Error(`${resp.status}`);
@@ -241,6 +171,7 @@
       addLog(`Created task "${title}"`);
     } catch (err) {
       addLog(`Create failed: ${err}`);
+      await fetchEvents();
     }
   }
 
@@ -263,7 +194,12 @@
         body: JSON.stringify(body),
       });
       if (!resp.ok) throw new Error(`${resp.status}`);
-    } catch {
+      // Take the server's version: it may have shifted the event into another
+      // timezone or attached a recurrence id the optimistic copy lacks.
+      const saved = (await resp.json()) as ECEvent;
+      events = events.map((e) => (e.id === id ? { ...e, ...saved } : e));
+    } catch (err) {
+      addLog(`Update failed: ${err}`);
       await fetchEvents();
     }
   }
@@ -303,15 +239,16 @@
 
   async function handleEventRemove(id: string) {
     const ev = events.find((e) => e.id === id);
-    // Resolve the provider before dropping the event from state, otherwise the
-    // lookup finds nothing and the delete falls back to the wrong provider.
+    // Resolve the provider/occurrence before dropping the event from state,
+    // otherwise the lookup finds nothing and the delete targets the wrong one.
     const query = eventQuery(id);
     events = events.filter((e) => e.id !== id);
     addLog(`Removed "${ev?.title ?? id}"`);
     try {
       const resp = await fetch(`/api/events/${id}${query}`, { method: 'DELETE' });
       if (!resp.ok) throw new Error(`${resp.status}`);
-    } catch {
+    } catch (err) {
+      addLog(`Delete failed: ${err}`);
       await fetchEvents();
     }
   }
@@ -326,15 +263,18 @@
     <p>Connecting...</p>
   {:else if error}
     <p>Could not reach the backend. Is the server running?</p>
-  {:else if !authenticated}
-    <p>Connect a calendar to get started.</p>
-    {#each configuredProviders as provider (provider.id)}
-      <a class="connect-btn" href={`/api/auth/${provider.id}`}>
-        Connect {provider.displayName}
-      </a>
-    {/each}
+  {:else if !configured}
+    <p>
+      No calendar configured. Set RADICALE_URL, RADICALE_USERNAME and
+      RADICALE_PASSWORD in .env, then restart the app.
+    </p>
   {:else}
-    <p class="status">Synced &mdash; polls every 30 s</p>
+    <p class="status">
+      Synced &mdash; polls every 30 s
+      {#each configuredProviders as provider (provider.id)}
+        &middot; {provider.displayName}
+      {/each}
+    </p>
     {#if log.length > 0}
       <div class="log">
         {#each log as entry}
@@ -348,8 +288,7 @@
 <SidebarWidget
   {events}
   {open}
-  {authenticated}
-  {providers}
+  {configured}
   {loading}
   {error}
   {syncError}
@@ -358,8 +297,6 @@
   {lastSync}
   onToggle={handleToggle}
   onRefresh={fetchEvents}
-  onConnect={handleConnect}
-  connectHint={connectHint}
   onEventClick={handleEventClick}
   onEventDrop={handleEventDrop}
   onEventResize={handleEventResize}
@@ -386,20 +323,6 @@
     margin: 0 0 1.5rem;
     font-size: 0.9rem;
   }
-
-  .connect-btn {
-    display: inline-block;
-    padding: 0.5rem 1.2rem;
-    margin: 0 0.5rem 0.5rem 0;
-    background: var(--accent);
-    color: var(--ink);
-    border-radius: 6px;
-    text-decoration: none;
-    font-size: 0.9rem;
-    font-weight: 500;
-    transition: opacity 150ms;
-  }
-  .connect-btn:hover { opacity: 0.85; }
 
   .log {
     border-top: 1px solid var(--line);

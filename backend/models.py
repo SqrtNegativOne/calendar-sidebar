@@ -13,11 +13,11 @@ DEFAULT_EVENT_TEXT_COLOR = "#a8cef0"
 
 
 def _parse_iso(value: str) -> datetime:
-    """Best-effort parse of an RFC3339 string from either provider.
+    """Best-effort parse of an RFC3339 string.
 
-    Google returns offsets (``...+02:00``) while Microsoft returns UTC without
-    an offset. ``fromisoformat`` handles both, but never trust provider input —
-    an unparseable value sorts to the epoch rather than raising mid-aggregation.
+    CalDAV servers return either an offset (``...+05:30``) or a bare UTC time.
+    ``fromisoformat`` handles both, but never trust server input — an
+    unparseable value sorts to the epoch rather than raising mid-aggregation.
     """
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -41,6 +41,10 @@ class CalendarEvent:
     provider_id: str
     color: str = DEFAULT_EVENT_COLOR
     text_color: str = DEFAULT_EVENT_TEXT_COLOR
+    # For one occurrence of a recurring event: the occurrence's original start.
+    # Sending it back is what lets an edit or delete target that occurrence
+    # instead of the whole series.
+    recurrence_id: str | None = None
 
     def sort_key(self) -> datetime:
         return _parse_iso(self.start)
@@ -56,4 +60,5 @@ class CalendarEvent:
             "provider": self.provider_id,
             "color": self.color,
             "textColor": self.text_color,
+            "recurrenceId": self.recurrence_id,
         }

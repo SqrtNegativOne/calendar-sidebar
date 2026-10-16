@@ -1,7 +1,7 @@
 [project]
 name = "calendar-sidebar"
 version = "0.1.0"
-description = "Always-on-top Windows desktop sidebar showing today's Google and Microsoft Calendar events"
+description = "Always-on-top Windows desktop sidebar showing today's events from a Radicale/CalDAV server"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -9,10 +9,9 @@ dependencies = [
   "PyQt6-WebEngine>=6.7",
   "fastapi>=0.115",
   "uvicorn>=0.34",
-  "google-auth>=2.38",
-  "google-auth-oauthlib>=1.2",
-  "google-api-python-client>=2.166",
-  "requests>=2.32",
+  "caldav>=3.5",
+  "icalendar>=7.3",
+  "tzlocal>=5.4",
   "python-dotenv>=1.0",
   "loguru>=0.7",
 ]

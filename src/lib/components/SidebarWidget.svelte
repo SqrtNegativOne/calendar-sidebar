@@ -30,6 +30,9 @@
     /* Which provider/calendar the event belongs to (merged reads). */
     provider?: string;
     calendarId?: string;
+    /* For one occurrence of a recurring event: its original start, which is
+       what tells the backend to change just that occurrence. */
+    recurrenceId?: string | null;
     color?: string;
     textColor?: string;
   }
@@ -38,24 +41,20 @@
     id: string;
     displayName: string;
     configured: boolean;
-    authenticated: boolean;
   }
 
   type Props = {
     events: ECEvent[];
     open: boolean;
-    authenticated?: boolean;
-    providers?: ProviderStatus[];
+    configured?: boolean;
     loading?: boolean;
     error?: boolean;
     syncError?: boolean;
     fetching?: boolean;
     lastError?: string | null;
     lastSync?: Date | null;
-    connectHint?: string | null;
     onToggle: () => void;
     onRefresh: () => void;
-    onConnect: (provider: string) => void;
     onEventClick: (info: any) => void;
     onEventDrop: (info: any) => void;
     onEventResize: (info: any) => void;
@@ -68,18 +67,15 @@
   let {
     events,
     open,
-    authenticated = true,
-    providers = [],
+    configured = true,
     loading = false,
     error = false,
     syncError = false,
     fetching = false,
     lastError = null,
     lastSync = null,
-    connectHint = null,
     onToggle,
     onRefresh,
-    onConnect,
     onEventClick,
     onEventDrop,
     onEventResize,
@@ -175,8 +171,8 @@
   }
 
   // event-calendar injects this html via innerHTML, so every interpolated
-  // value must be escaped — event titles and ids come from Google and are
-  // not trusted.
+  // value must be escaped — event titles and ids come from the calendar
+  // server and are not trusted.
   function escapeHtml(value: unknown): string {
     return String(value ?? '').replace(
       /[&<>"']/g,
@@ -214,11 +210,13 @@
   const calPlugins = [TimeGrid, Interaction];
   const scrollH = Math.max(6, new Date().getHours() - 2);
 
-  // All-day events (`start.date` on Google) are returned by the API so the
+  // All-day events (`start.date` in CalDAV) are returned by the API so the
   // widget still knows the day is not empty, but they are intentionally not
   // rendered in the grid — the previous behaviour mapped them to full-height
   // timed blocks that consumed the whole column. `events` keeps them for the
   // empty-state count and lookups; only timed events reach event-calendar.
+  // They are also read-only here: the grid is what creates, moves and removes
+  // events, and they never reach it.
   let calEvents = $derived(events.filter((e) => !e.allDay));
 
   // svelte-ignore state_referenced_locally
@@ -329,20 +327,13 @@
       <div class="panel-status">Connecting...</div>
     {:else if error}
       <div class="panel-status">Backend unreachable</div>
-    {:else if !authenticated}
+    {:else if !configured}
       <div class="panel-status">
-        <p>No calendar connected.</p>
-        {#each providers.filter((p) => p.configured) as provider (provider.id)}
-          <button class="connect-link" onclick={() => onConnect(provider.id)}>
-            Connect {provider.displayName}
-          </button>
-        {/each}
-        {#if providers.every((p) => !p.configured)}
-          <p>No providers configured — see .env.example.</p>
-        {/if}
-        {#if connectHint}
-          <p class="connect-hint">{connectHint}</p>
-        {/if}
+        <p>No calendar configured.</p>
+        <p class="config-hint">
+          Set RADICALE_URL, RADICALE_USERNAME and RADICALE_PASSWORD in .env,
+          then restart the app (see .env.example).
+        </p>
       </div>
     {:else}
       {#if syncError}
@@ -490,24 +481,7 @@
   .panel-status p {
     margin: 0;
   }
-  .connect-link {
-    display: inline-block;
-    padding: 0.4rem 1rem;
-    background: var(--accent);
-    color: var(--ink);
-    border: none;
-    border-radius: 5px;
-    text-decoration: none;
-    font-family: inherit;
-    font-size: 0.8rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 150ms;
-  }
-  .connect-link:hover {
-    opacity: 0.8;
-  }
-  .connect-hint {
+  .config-hint {
     font-size: 0.7rem;
     opacity: 0.75;
     max-width: 100%;
@@ -659,8 +633,8 @@
   }
 
   .calendar-wrap :global(.ec-event) {
-    /* Background and text colour are per-event (the Google calendar's own
-       colours, applied inline by event-calendar); only shared chrome here. */
+    /* Background and text colour are per-event (the calendar's own colours,
+       applied inline by event-calendar); only shared chrome here. */
     border-left: 3px solid rgba(255, 255, 255, 0.35) !important;
     border-radius: 3px;
   }

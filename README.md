@@ -1,13 +1,14 @@
 # Calendar Sidebar
 
-Always-on-top Windows desktop sidebar showing today's **Google** and
-**Microsoft** Calendar events. PyQt6 hosts a WebEngine rendering a
+Always-on-top Windows desktop sidebar showing today's events from a
+**Radicale / CalDAV** server. PyQt6 hosts a WebEngine rendering a
 Svelte/SvelteKit frontend; a FastAPI/uvicorn backend runs on a background thread
-and handles OAuth2 + event CRUD per provider.
+and talks CalDAV to the calendar server.
 
 ## Quick start
 
 ```
+# 1. have Radicale running (see below)
 bun install          # install frontend deps (once)
 bun run build        # compile the Svelte frontend (required once)
 uv run widget.py     # start the app
@@ -15,67 +16,61 @@ uv run widget.py     # start the app
 
 Or double-click `run.vbs` for a silent, no-console launch.
 
-Configure either or both providers in `.env` (see `.env.example`) and click
-**Connect** in the sidebar. For each provider, the widget copies a consent URL
-to your clipboard — paste it into any browser to sign in; the sidebar detects
-the callback automatically.
+Point the sidebar at your server in `.env` (see `.env.example`):
 
-Full architecture, OAuth setup, debugging table, and conventions live in
+```
+RADICALE_URL=http://127.0.0.1:5232
+RADICALE_USERNAME=me
+RADICALE_PASSWORD=...
+# optional: comma-separated calendars to read (first one receives new events)
+# RADICALE_CALENDAR_IDS=SqrtCal,Work
+```
+
+There is no sign-in step: credentials are read from `.env` at startup. Leave
+`RADICALE_USERNAME` unset and the sidebar says so instead of failing.
+
+Full architecture, CalDAV notes, debugging table, and conventions live in
 [AGENTS.md](./AGENTS.md).
 
-## Provider setup
+## Using it
 
-### Google
+- **Click or drag on empty grid space** to create a task at that time.
+- **Drag / resize** an event to move it or change its length.
+- **Double-click a title** to rename it.
+- **×** on an event removes it (for one occurrence of a recurring event, just
+  that occurrence is excluded — the series stays).
+- Events are re-fetched every 30 s while the panel is open.
 
-1. Create an OAuth 2.0 credential (type: **Web application**) in
-   [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
-2. Add `http://localhost:8764/api/auth/callback` as an **Authorized redirect URI**.
-3. Set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env`.
-
-### Microsoft
-
-1. Register an app in Azure / Entra ID (**App registrations → New registration**).
-2. Add a **Web** redirect URI `http://localhost:8764/api/auth/microsoft/callback`
-   under **Authentication**.
-3. Add Microsoft Graph **delegated** permission `Calendars.ReadWrite` under
-   **API permissions**.
-4. Create a client secret under **Certificates & secrets**.
-5. Set `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` in `.env`
-   (`MICROSOFT_TENANT_ID` defaults to `common`).
+Multiple calendars are merged, each event keeping its calendar's colour. All-day
+events count towards "today is not empty" but are not drawn in the time grid.
 
 ## Troubleshooting
 
-### `Error 400: redirect_uri_mismatch` (Google)
+### The sidebar says "No calendar configured"
 
-`GOOGLE_REDIRECT_URI` must be byte-for-byte identical to an **Authorized
-redirect URI** on the OAuth client (Google treats `localhost` and `127.0.0.1`
-as different values). For the widget, register:
+`RADICALE_USERNAME` (or `RADICALE_URL`) is missing from `.env`. Set them and
+restart the app — the configuration is read once at startup.
 
-```
-http://localhost:8764/api/auth/callback
-```
+### `Cannot reach Radicale at ...` in the sidebar
 
-If you also develop against the Vite dev server, register its URI too:
+The calendar server isn't running, or the URL/port is wrong. Start Radicale
+(e.g. `python C:\radicale\run_radicale.py`) and hit **Retry**.
 
-```
-http://localhost:5173/api/auth/callback
-```
+### `Radicale rejected the configured credentials`
 
-Google Cloud Console → **APIs & Services** → **Credentials** → the OAuth 2.0
-client ID → **Authorized redirect URIs** → add → **Save**. Changes can take a
-few minutes to propagate. The redirect URI used is the `GOOGLE_REDIRECT_URI`
-value in `.env`, and the API port must match it.
+The htpasswd entry doesn't match. Check `RADICALE_USERNAME` / `RADICALE_PASSWORD`
+against `C:\radicale\users`, and that `htpasswd_encryption` in
+`C:\radicale\config` matches how the file was written (`plain` in this setup).
 
-### `AADSTS50011: redirect URI mismatch` (Microsoft)
+### A PUT is rejected with `VTIMEZONE components must contain a valid TZID`
 
-`MICROSOFT_REDIRECT_URI` must match a **Web** redirect URI on the app
-registration exactly. Register
-`http://localhost:8764/api/auth/microsoft/callback`, or set the variable to
-whatever you registered.
+The event carries a `TZID` the server can't resolve — typically a Windows zone
+name (`India Standard Time`) or a bare offset (`+05:30`) written by a client that
+used `datetime.now().astimezone()` on Windows. The sidebar always writes IANA
+zone names; to repair existing data, recreate the event or rewrite its
+`DTSTART`/`DTEND` with a proper `TZID` (or `Z`).
 
-### Port fallback breaks first-time login
+### Ports
 
-The API scans upward for a free port if `8764` is taken. OAuth redirect URIs
-are fixed, so either free the port or point the provider's redirect variable at
-the port the server actually reported in `log/widget.log`. Once at least one
-provider has a stored token, the port no longer matters for it.
+The API server binds `8764` and scans upward if it's taken. Nothing external
+points at that port, so a fallback is harmless.
