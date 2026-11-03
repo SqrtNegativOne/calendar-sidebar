@@ -10,6 +10,8 @@ web UI (e.g. cancelling the inline title editor).
 Dependencies are declared in pyproject.toml (installed via uv).
 """
 
+import os
+import subprocess
 import sys
 import threading
 import ctypes
@@ -36,9 +38,38 @@ from PyQt6.QtNetwork import (
 )
 
 
-_BUILD_DIR = Path(__file__).parent / "build"
-_LOG_FILE = Path(__file__).parent / "log" / "widget.log"
-_ICON_FILE = Path(__file__).parent / "icon.png"
+_PROJECT_DIR = Path(__file__).parent
+_BUILD_DIR = _PROJECT_DIR / "build"
+_LOG_FILE = _PROJECT_DIR / "log" / "widget.log"
+_ICON_FILE = _PROJECT_DIR / "icon.png"
+_RUN_VBS = _PROJECT_DIR / "run.vbs"
+
+# Relaunches the app once the current process has fully exited, so the
+# single-instance mutex and the API port are both free by then.
+_RESTART_HELPER = r"""
+import ctypes
+import subprocess
+import sys
+import time
+
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT_MS = 15000
+
+pid = int(sys.argv[1])
+cwd = sys.argv[2]
+command = sys.argv[3:]
+
+if sys.platform == "win32":
+    handle = ctypes.windll.kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if handle:
+        ctypes.windll.kernel32.WaitForSingleObject(handle, _WAIT_TIMEOUT_MS)
+        ctypes.windll.kernel32.CloseHandle(handle)
+else:
+    time.sleep(1.0)
+
+time.sleep(0.3)
+subprocess.Popen(command, cwd=cwd)
+"""
 
 _INJECT_JS = r"""
 (function () {
@@ -80,6 +111,18 @@ def _start_server(server) -> None:
 
     logger.debug("Server thread starting")
     run(server)
+
+
+def _relaunch_command() -> list[str]:
+    """Command that starts a fresh instance the same way this one was started."""
+    if _RUN_VBS.exists():
+        return ["wscript.exe", str(_RUN_VBS)]
+    exe = Path(sys.executable)
+    if sys.platform == "win32" and exe.name.lower() == "python.exe":
+        pythonw = exe.with_name("pythonw.exe")
+        if pythonw.exists():
+            exe = pythonw
+    return [str(exe), str(Path(__file__).resolve())]
 
 
 def _acquire_single_instance() -> bool:
@@ -184,9 +227,12 @@ class CalendarWindow(QMainWindow):
         self._menu = menu
         act_toggle = QAction("Show / Hide sidebar", menu)
         act_toggle.triggered.connect(self._toggle_visible)
+        act_restart = QAction("Restart", menu)
+        act_restart.triggered.connect(self._restart)
         act_quit = QAction("Quit", menu)
         act_quit.triggered.connect(QApplication.quit)
         menu.addAction(act_toggle)
+        menu.addAction(act_restart)
         menu.addSeparator()
         menu.addAction(act_quit)
 
@@ -199,6 +245,35 @@ class CalendarWindow(QMainWindow):
         # Left-click on the tray icon also toggles the window
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._toggle_visible()
+
+    def _restart(self) -> None:
+        """Quit and relaunch the app via a detached helper process."""
+        command = _relaunch_command()
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        logger.info(f"Restart requested from tray — relaunching: {command}")
+        helper = [
+            sys.executable,
+            "-c",
+            _RESTART_HELPER,
+            str(os.getpid()),
+            str(_PROJECT_DIR),
+            *command,
+        ]
+        try:
+            subprocess.Popen(
+                helper,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                close_fds=True,
+            )
+        except OSError as exc:
+            logger.error(f"Could not start restart helper: {exc}")
+            return
+        QApplication.quit()
 
     def _toggle_visible(self) -> None:
         if self.isVisible():
