@@ -637,6 +637,11 @@
        applied inline by event-calendar); only shared chrome here. */
     border-left: 3px solid rgba(255, 255, 255, 0.35) !important;
     border-radius: 3px;
+    transition: filter 120ms ease, box-shadow 120ms ease;
+  }
+  .calendar-wrap :global(.ec-event:hover) {
+    filter: brightness(1.25);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.35);
   }
 
   .calendar-wrap :global(.ec-short .ec-event-body) {
